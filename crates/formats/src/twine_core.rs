@@ -346,7 +346,8 @@ impl FormatPluginMut for TwineCorePlugin {
         passage_tags: &[String],
         passage_text: &str,
         _file_uri: &str,
-    ) -> Option<Passage> {
+        passage_offset: usize,
+    ) -> Option<crate::plugin::ParseResult> {
         let special_def = self.classify_passage(passage_name, passage_tags);
         let is_special = special_def.is_some();
 
@@ -359,8 +360,14 @@ impl FormatPluginMut for TwineCorePlugin {
         passage.vars = Vec::new();
         passage.is_special = is_special;
         passage.special_def = special_def;
+        passage.passage_offset = passage_offset;
 
-        Some(passage)
+        Some(crate::plugin::ParseResult {
+            passages: vec![passage],
+            token_groups: Vec::new(),
+            diagnostic_groups: Vec::new(),
+            is_complete: true,
+        })
     }
 
     fn remove_file_from_registries(&mut self, _file_uri: &str) {}

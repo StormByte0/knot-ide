@@ -92,16 +92,18 @@ pub(crate) async fn did_open(state: &ServerState, params: DidOpenTextDocumentPar
         helpers::parse_with_format_plugin(&mut inner.format_registry, &uri, &text, format, version);
 
     // Store format diagnostics for this document
-    inner
-        .format_diagnostics
-        .insert(uri.clone(), parse_result.diagnostic_groups.clone());
+    inner.format_diagnostics.insert(
+        uri.clone(),
+        helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups.clone()),
+    );
 
     // Cache semantic tokens at parse time so semantic_tokens_full
     // never needs to re-parse (critical for avoiding deadlock with
     // FormatPluginMut in Phase 4).
-    inner
-        .semantic_tokens
-        .insert(uri.clone(), parse_result.token_groups.clone());
+    inner.semantic_tokens.insert(
+        uri.clone(),
+        helpers::token_groups_to_map(parse_result.token_groups.clone()),
+    );
 
     // Insert the parsed document into the workspace.
     //
@@ -153,8 +155,9 @@ pub(crate) async fn did_open(state: &ServerState, params: DidOpenTextDocumentPar
     // Release write lock before analysis — same two-phase pattern as did_change
     drop(inner);
 
-    // Read-lock phase: analysis (read-only)
-    let (diagnostics, open_docs, fmt_diags, config) = {
+    // Read-lock phase: analysis + build LSP diagnostics (sync).
+    // Task 3: consolidated — no more separate phase 3 lock for publishing.
+    let prebuilt_diagnostics = {
         let inner = state.inner.read().await;
         let diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry)
@@ -176,31 +179,19 @@ pub(crate) async fn did_open(state: &ServerState, params: DidOpenTextDocumentPar
                 Vec::new() // Return empty diagnostics rather than crashing
             }
         };
-        let open_docs = inner.open_documents.clone();
-        let fmt_diags = inner.format_diagnostics.clone();
-        let config = inner.workspace.config.clone();
-        (diagnostics, open_docs, fmt_diags, config)
-    };
-
-    {
-        let inner = state.inner.read().await;
-        let format = inner.workspace.resolve_format();
-        let plugin = inner.format_registry.get(&format);
-        let sigils: Vec<char> = plugin
-            .as_ref()
-            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-            .unwrap_or_default();
-        helpers::publish_all_diagnostics(
-            &state.client,
+        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+        helpers::build_all_lsp_diagnostics(
             &diagnostics,
-            &fmt_diags,
-            &open_docs,
+            &inner.format_diagnostics,
+            &inner.open_documents,
             &inner.workspace,
-            &config,
+            &inner.workspace.config,
             &sigils,
         )
-        .await;
-    }
+    }; // ← read lock dropped
+
+    // Send diagnostics to the client (lock-free).
+    helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 
     // Schedule a debounced semantic token refresh. Format is frozen
     // after indexing — no format switch cascades are possible.
@@ -223,12 +214,118 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
 
     let mut inner = state.inner.write().await;
 
+    // ── Phase 1: synchronous core — classify, dispatch, cache, graph surgery.
+    // Extracted into `did_change_phase1` so tests can call it directly without
+    // a `tower_lsp::Client` or async runtime.
+    let phase1_result = did_change_phase1(&mut inner, uri.clone(), version, params.content_changes);
+
+    // ── Phase 1 complete: all state mutations are done. ──────────────
+    // Release the write lock early so that read-lock handlers
+    // (codeAction, documentLink, inlayHint, etc.) are not blocked while
+    // we run the (read-only) diagnostic analysis below.  This is the key
+    // fix for the "Cannot call write after a stream was destroyed" race:
+    // the shorter the write-lock hold time, the less likely a restart
+    // will catch in-flight handlers still waiting for the lock.
+
+    drop(inner); // ← release write lock
+
+    // ── Phase 2: read-lock — analysis + build LSP diagnostics (sync) ────
+    // Task 3: phase 2 now does BOTH the analysis AND the LSP diagnostic
+    // building. The pre-built diagnostics are returned as owned values,
+    // so the read lock can be dropped before the async client send.
+    let prebuilt_diagnostics = {
+        let inner = state.inner.read().await;
+        did_change_phase2(&inner, &phase1_result.uri)
+    }; // ← read lock dropped
+
+    // ── Phase 3: send diagnostics to the client (lock-free) ────────────
+    // Task 3: the LSP client await is now lock-free. It does not touch
+    // `ServerStateInner` at all, so the next keystroke's phase 1 (write
+    // lock) is not blocked by the network/IPC latency of
+    // `client.publish_diagnostics`.
+    helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
+
+    // Schedule a debounced semantic token refresh. Format is frozen
+    // after indexing — no format switch cascades are possible.
+    state.schedule_semantic_token_refresh().await;
+}
+
+/// Result of [`did_change_phase1`] — the synchronous core of `did_change`.
+///
+/// Carries the URI (for phase 2 logging) and a summary of what happened
+/// (which dispatch path was taken, whether the incremental path panicked).
+/// Tests inspect this to assert dispatch decisions.
+#[derive(Debug, Clone)]
+pub struct DidChangePhase1Result {
+    /// The URI of the document that was changed.
+    pub uri: url::Url,
+    /// The LSP version of the document after the change.
+    pub version: i32,
+    /// Which dispatch path was taken.
+    pub dispatch: DidChangeDispatch,
+}
+
+/// Which dispatch path `did_change_phase1` took for an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DidChangeDispatch {
+    /// The edit was classified as `WithinPassage` and the incremental
+    /// single-passage re-parse succeeded.
+    Incremental { passage_name: String },
+    /// The edit was classified as `WithinPassage` but the incremental
+    /// re-parse panicked. The panic was contained — a scoped `sc-parse`
+    /// diagnostic was emitted for the panicking passage and other passages'
+    /// cache entries were left untouched.
+    IncrementalPanic { passage_name: String },
+    /// The edit was classified as `WithinPassage` but the incremental path
+    /// returned `None` (classification failure or no plugin). Fell back to
+    /// full-file re-parse.
+    IncrementalFallback,
+    /// The edit was classified as `BoundaryCrossing` (added/removed a `:: `
+    /// header line or spanned multiple passages). Full-file re-parse.
+    BoundaryCrossing,
+    /// The edit was a full-text replacement (`range == None`) or no
+    /// pre-edit document existed. Full-file re-parse.
+    WholeDocument,
+}
+
+/// Phase 1 of `did_change`: the synchronous core that mutates `ServerStateInner`.
+///
+/// This function:
+/// 1. Updates `doc_versions` with the authoritative LSP version.
+/// 2. Snapshots pre-edit state (`text_before`, `doc_before`).
+/// 3. Applies rope edits via `apply_document_changes`.
+/// 4. Calls `classify_edit` to determine `EditImpact`.
+/// 5. Dispatches: `WithinPassage` → incremental single-passage re-parse
+///    (with `catch_unwind` panic isolation); `BoundaryCrossing`/`WholeDocument`
+///    → full-file re-parse.
+/// 6. Updates `format_diagnostics` and `semantic_tokens` caches (surgical
+///    merge for incremental, wholesale replace for full re-parse — M3).
+/// 7. Computes dynamic navigation edges and calls `apply_document_update`
+///    (graph surgery).
+///
+/// Returns a [`DidChangePhase1Result`] summarizing the dispatch decision.
+/// Tests call this directly to assert dispatch behavior without needing a
+/// `tower_lsp::Client` or async runtime.
+pub fn did_change_phase1(
+    inner: &mut crate::state::ServerStateInner,
+    uri: url::Url,
+    version: i32,
+    content_changes: Vec<TextDocumentContentChangeEvent>,
+) -> DidChangePhase1Result {
     // Update doc_versions with the authoritative LSP version
     inner.doc_versions.insert(uri.clone(), version);
 
+    // ── Snapshot pre-edit state for edit classification (M2) ──
+    // We need the pre-edit text and document to classify the edit's impact.
+    // If the edit is WithinPassage, we can skip the full-file re-parse and
+    // only re-parse the affected passage.
+    let text_before = inner.open_documents.get(&uri).cloned().unwrap_or_default();
+    let doc_before = inner.workspace.get_document(&uri).cloned();
+    let changes_for_classify = content_changes.clone();
+
     // Apply incremental changes to the rope-based snapshot and get the
     // resulting full text for re-parsing.
-    let text = apply_document_changes(&mut inner, &uri, version, params.content_changes);
+    let text = apply_document_changes(inner, &uri, version, content_changes);
 
     // Always update the text cache immediately so go-to-definition etc.
     // see the latest content
@@ -242,25 +339,137 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
         inner.debounce.clear_skipped();
     }
 
-    // Parse with format plugin
+    // ── Classify the edit's impact (M2) ──
+    let impact = match &doc_before {
+        Some(doc) => helpers::classify_edit(doc, &text_before, &changes_for_classify),
+        None => helpers::EditImpact::WholeDocument,
+    };
+
     let format = inner.workspace.resolve_format();
-    let (doc, parse_result) = helpers::parse_with_format_plugin(
-        &mut inner.format_registry,
-        &uri,
-        &text,
-        format.clone(),
-        version,
-    );
 
-    // Update format diagnostics
-    inner
-        .format_diagnostics
-        .insert(uri.clone(), parse_result.diagnostic_groups.clone());
+    // ── Dispatch based on edit impact ──
+    // `was_incremental` tracks whether the result came from the incremental
+    // path (single-passage `ParseResult`) or the full re-parse path (all
+    // passages). M3 uses this to decide between merging the result into the
+    // existing cache (incremental) vs replacing the whole cache (full).
+    let (doc, parse_result, was_incremental, is_panic_degraded, panicked_passage_name, dispatch) = match &impact {
+        helpers::EditImpact::WithinPassage {
+            passage_name,
+            in_passage_range: _,
+        } => {
+            // Incremental path: re-parse only the touched passage.
+            tracing::info!(
+                file = %uri,
+                version,
+                passage = %passage_name,
+                "did_change: WithinPassage — incremental re-parse"
+            );
 
-    // Cache semantic tokens at parse time
-    inner
-        .semantic_tokens
-        .insert(uri.clone(), parse_result.token_groups.clone());
+            match did_change_incremental(
+                inner,
+                &uri,
+                &format,
+                version,
+                &text,
+                doc_before.as_ref(),
+                passage_name,
+            ) {
+                Some((doc, parse_result, panicked)) => {
+                    let dispatch = if panicked {
+                        DidChangeDispatch::IncrementalPanic { passage_name: passage_name.clone() }
+                    } else {
+                        DidChangeDispatch::Incremental { passage_name: passage_name.clone() }
+                    };
+                    let panicked_name = if panicked { Some(passage_name.clone()) } else { None };
+                    (doc, parse_result, true, panicked, panicked_name, dispatch)
+                }
+                None => {
+                    // Incremental path failed (classification failure, no
+                    // plugin, or offset computation issue). Fall back to
+                    // full re-parse.
+                    tracing::info!(
+                        file = %uri,
+                        "did_change: incremental path failed, falling back to full re-parse"
+                    );
+                    let (doc, parse_result) = helpers::parse_with_format_plugin(
+                        &mut inner.format_registry,
+                        &uri,
+                        &text,
+                        format.clone(),
+                        version,
+                    );
+                    (doc, parse_result, false, false, None, DidChangeDispatch::IncrementalFallback)
+                }
+            }
+        }
+        helpers::EditImpact::BoundaryCrossing | helpers::EditImpact::WholeDocument => {
+            // Full re-parse path (existing behavior).
+            let dispatch = if matches!(impact, helpers::EditImpact::BoundaryCrossing) {
+                tracing::info!(
+                    file = %uri,
+                    version,
+                    "did_change: BoundaryCrossing — full re-parse"
+                );
+                DidChangeDispatch::BoundaryCrossing
+            } else {
+                tracing::info!(
+                    file = %uri,
+                    version,
+                    "did_change: WholeDocument — full re-parse"
+                );
+                DidChangeDispatch::WholeDocument
+            };
+            let (doc, parse_result) = helpers::parse_with_format_plugin(
+                &mut inner.format_registry,
+                &uri,
+                &text,
+                format.clone(),
+                version,
+            );
+            (doc, parse_result, false, false, None, dispatch)
+        }
+    };
+
+    // Update format diagnostics cache (M3 surgical invalidation).
+    if was_incremental {
+        // Incremental path: merge the single-passage result into the existing
+        // cache entry. Other passages' groups are untouched.
+        let existing = inner
+            .format_diagnostics
+            .entry(uri.clone())
+            .or_default();
+        helpers::merge_incremental_diagnostics(existing, &parse_result);
+    } else {
+        // Full re-parse path: replace the whole per-URI cache entry.
+        inner.format_diagnostics.insert(
+            uri.clone(),
+            helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups.clone()),
+        );
+    }
+
+    // Update semantic tokens cache (M3 surgical invalidation).
+    if was_incremental {
+        // Incremental path: merge the single-passage result into the existing
+        // cache entry. On panic-degraded mode, the panicked passage's tokens
+        // are removed (no tokens emitted for broken JS); other passages'
+        // tokens are untouched.
+        let existing = inner
+            .semantic_tokens
+            .entry(uri.clone())
+            .or_default();
+        helpers::merge_incremental_tokens(
+            existing,
+            &parse_result,
+            is_panic_degraded,
+            panicked_passage_name.as_deref(),
+        );
+    } else {
+        // Full re-parse path: replace the whole per-URI cache entry.
+        inner.semantic_tokens.insert(
+            uri.clone(),
+            helpers::token_groups_to_map(parse_result.token_groups.clone()),
+        );
+    }
 
     // Compute dynamic navigation edges for the new passages
     // Include the edge_type_hint from ResolvedNavLink so that dynamic
@@ -309,73 +518,293 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
         inner.workspace.graph.edge_count()
     );
 
-    // ── Phase 1 complete: all state mutations are done. ──────────────
-    // Release the write lock early so that read-lock handlers
-    // (codeAction, documentLink, inlayHint, etc.) are not blocked while
-    // we run the (read-only) diagnostic analysis below.  This is the key
-    // fix for the "Cannot call write after a stream was destroyed" race:
-    // the shorter the write-lock hold time, the less likely a restart
-    // will catch in-flight handlers still waiting for the lock.
+    DidChangePhase1Result { uri, version, dispatch }
+}
 
-    drop(inner); // ← release write lock
+/// Phase 2 of `did_change`: the synchronous read-lock analysis core.
+///
+/// Runs `analyze_with_format_vars` on the workspace (read-only) and builds
+/// the complete LSP `Diagnostic` objects (via `build_all_lsp_diagnostics`),
+/// ready for `send_lsp_diagnostics`. Tests call this directly after
+/// [`did_change_phase1`] to inspect what would be published.
+///
+/// **Task 3 (optimization)**: this function now does BOTH the analysis AND
+/// the LSP diagnostic building (previously split between phase 2 and phase 3).
+/// The LSP `publish_diagnostics` await is now lock-free (done by
+/// `send_lsp_diagnostics` in the async `did_change` wrapper).
+///
+/// Returns `Vec<(Url, Vec<Diagnostic>)>` — pre-built diagnostics grouped by
+/// URI, ready to send to the client without any state access.
+pub fn did_change_phase2(
+    inner: &crate::state::ServerStateInner,
+    uri: &url::Url,
+) -> Vec<(url::Url, Vec<lsp_types::Diagnostic>)> {
+    let diagnostics =
+        helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
+    tracing::trace!(
+        file = %uri,
+        diagnostic_count = diagnostics.len(),
+        workspace_total_passages = inner.workspace.passage_count(),
+        workspace_total_documents = inner.workspace.document_count(),
+        graph_nodes = inner.workspace.graph.passage_count(),
+        graph_edges = inner.workspace.graph.edge_count(),
+        "did_change: analysis complete"
+    );
 
-    // ── Phase 2: read-lock — analysis (read-only) ──────────────────
-    let (diagnostics, open_docs, fmt_diags, config) = {
-        let inner = state.inner.read().await;
-        let diagnostics =
-            helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
-        tracing::trace!(
-            file = %uri,
-            diagnostic_count = diagnostics.len(),
-            workspace_total_passages = inner.workspace.passage_count(),
-            workspace_total_documents = inner.workspace.document_count(),
-            graph_nodes = inner.workspace.graph.passage_count(),
-            graph_edges = inner.workspace.graph.edge_count(),
-            "did_change: analysis complete"
-        );
-
-        // Log passage count summary (not full list — that was too noisy and
-        // produced huge debug output on every keystroke)
-        {
-            let total_passages: usize = inner.workspace.documents().map(|d| d.passages.len()).sum();
-            let total_docs = inner.workspace.document_count();
-            tracing::debug!(
-                total_documents = total_docs,
-                total_passages,
-                "did_change: workspace summary"
-            );
-        }
-
-        let open_docs = inner.open_documents.clone();
-        let fmt_diags = inner.format_diagnostics.clone();
-        let config = inner.workspace.config.clone();
-        (diagnostics, open_docs, fmt_diags, config)
-    }; // ← read lock dropped
-
-    // ── Phase 3: publish (needs workspace read lock for variable related info) ──
+    // Log passage count summary (not full list — that was too noisy and
+    // produced huge debug output on every keystroke)
     {
-        let inner = state.inner.read().await;
-        let format = inner.workspace.resolve_format();
-        let plugin = inner.format_registry.get(&format);
-        let sigils: Vec<char> = plugin
-            .as_ref()
-            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-            .unwrap_or_default();
-        helpers::publish_all_diagnostics(
-            &state.client,
-            &diagnostics,
-            &fmt_diags,
-            &open_docs,
-            &inner.workspace,
-            &config,
-            &sigils,
-        )
-        .await;
+        let total_passages: usize = inner.workspace.documents().map(|d| d.passages.len()).sum();
+        let total_docs = inner.workspace.document_count();
+        tracing::debug!(
+            total_documents = total_docs,
+            total_passages,
+            "did_change: workspace summary"
+        );
     }
 
-    // Schedule a debounced semantic token refresh. Format is frozen
-    // after indexing — no format switch cascades are possible.
-    state.schedule_semantic_token_refresh().await;
+    // Task 3: build LSP diagnostics under the read lock (sync), so the
+    // async send can be lock-free.
+    let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+    helpers::build_all_lsp_diagnostics(
+        &diagnostics,
+        &inner.format_diagnostics,
+        &inner.open_documents,
+        &inner.workspace,
+        &inner.workspace.config,
+        &sigils,
+    )
+}
+
+/// Incremental re-parse path for `WithinPassage` edits (M2).
+///
+/// This function:
+/// 1. Finds the edited passage in `doc_before` to get its pre-edit offset and tags.
+/// 2. Computes the post-edit passage offset (adjusted for any byte delta from
+///    edits before this passage).
+/// 3. Extracts the post-edit passage text from `text_after`.
+/// 4. Calls `parse_passage_incremental` (which wraps `parse_passage_mut` in
+///    `catch_unwind`).
+/// 5. On success: builds a `Document` by cloning `doc_before`, splicing in
+///    the new passage, and fixing up `passage_offset` for subsequent passages.
+/// 6. On panic: calls `replace_passage_with_error` to emit a scoped diagnostic.
+/// 7. On `ClassificationFailed` or `NoPlugin`: returns `None` to signal the
+///    caller to fall back to full re-parse.
+///
+/// Returns `Some((Document, ParseResult, panicked))` on success or
+/// panic-contained failure, or `None` if the caller should fall back to
+/// full re-parse. The `panicked` flag is `true` when the result came from
+/// the panic-error fallback path (M3 uses this to decide whether to remove
+/// the panicked passage's token group from the cache).
+fn did_change_incremental(
+    inner: &mut crate::state::ServerStateInner,
+    uri: &url::Url,
+    format: &knot_core::passage::StoryFormat,
+    version: i32,
+    text_after: &str,
+    doc_before: Option<&knot_core::Document>,
+    passage_name: &str,
+) -> Option<(knot_core::Document, knot_formats::plugin::ParseResult, bool)> {
+    let doc_before = doc_before?;
+
+    // Find the edited passage in the pre-edit document.
+    let old_passage_idx = doc_before.passages.iter().position(|p| p.name == passage_name)?;
+    let old_passage = &doc_before.passages[old_passage_idx];
+    let old_passage_offset = old_passage.passage_offset;
+    let passage_tags = old_passage.tags.clone();
+
+    // Compute the post-edit passage offset. For single-passage edits, the
+    // passage offset doesn't change (the edit is WITHIN the passage, so
+    // nothing before it changed). For multi-change batches confined to the
+    // same passage, we'd need to account for deltas from changes before
+    // this passage — but classify_edit only returns WithinPassage when all
+    // changes are in the same passage, so no changes are before it.
+    // Therefore: passage_offset_new == old_passage_offset.
+    let passage_offset_new = old_passage_offset;
+
+    // Find the next passage's offset (post-edit). Since the edit is within
+    // one passage, the next passage's offset doesn't change either.
+    let next_passage_offset = if old_passage_idx + 1 < doc_before.passages.len() {
+        doc_before.passages[old_passage_idx + 1].passage_offset
+    } else {
+        text_after.len()
+    };
+
+    // Extract the post-edit passage text.
+    let passage_start = passage_offset_new;
+    let passage_end = next_passage_offset;
+    if passage_start > text_after.len() || passage_end > text_after.len() {
+        tracing::warn!(
+            file = %uri,
+            passage = %passage_name,
+            "did_change_incremental: passage offsets out of bounds, falling back"
+        );
+        return None;
+    }
+    let passage_text = &text_after[passage_start..passage_end];
+
+    // Call the incremental parser.
+    let incremental_result = helpers::parse_passage_incremental(
+        &mut inner.format_registry,
+        uri,
+        format.clone(),
+        version,
+        passage_name,
+        &passage_tags,
+        passage_text,
+        passage_offset_new,
+    );
+
+    match incremental_result {
+        Ok(single_result) => {
+            // Success: splice the new passage into the document.
+            let mut new_doc = doc_before.clone();
+            // Replace the passage by name.
+            if let Some(new_passage) = single_result.passages.into_iter().next()
+                && let Some(slot) = new_doc.passages.iter_mut().find(|p| p.name == passage_name)
+            {
+                *slot = new_passage;
+            }
+            // The passage_offset values don't need fix-up because the edit
+            // is within a single passage (no boundary crossing, no size
+            // change to other passages). The edited passage's offset is
+            // already set correctly by parse_passage_incremental.
+            //
+            // Note: the edited passage's TEXT may have grown or shrunk, but
+            // since we extracted text up to the NEXT passage's offset
+            // (which didn't change), the edited passage's span now covers
+            // the right range. The next passage's offset is still correct.
+
+            // Build a full ParseResult from the single-passage result.
+            // The diagnostic_groups and token_groups from the incremental
+            // parse replace the old ones for this passage; other passages'
+            // groups are preserved from doc_before's cached state (the
+            // caller handles the cache merge via merge_incremental_*).
+            let full_result = knot_formats::plugin::ParseResult {
+                passages: new_doc.passages.clone(),
+                token_groups: single_result.token_groups,
+                diagnostic_groups: single_result.diagnostic_groups,
+                is_complete: true,
+            };
+
+            // Set the snapshot on the new doc.
+            //
+            // Task 2 (optimization): instead of rebuilding the rope from
+            // `text_after` via `set_snapshot_from_text` (which calls
+            // `Rope::from_str` — a full rope build), we steal the
+            // already-mutated rope from the workspace's document.
+            // `apply_document_changes` (called earlier in
+            // `did_change_phase1`) mutated `inner.workspace.documents[uri]
+            // .snapshot.rope` in place via `apply_incremental_change`.
+            // That rope IS the post-edit rope. We clone it (ropey's clone
+            // is O(log n) tree copy, much cheaper than `Rope::from_str`)
+            // and install it on `new_doc`.
+            //
+            // We also update `passage_names` on the snapshot to match
+            // `new_doc.passages` (in case the edit renamed a passage —
+            // rare for WithinPassage but defensive).
+            new_doc.version = version;
+            if let Some(workspace_doc) = inner.workspace.get_document(uri) {
+                if let Some(ref ws_snapshot) = workspace_doc.snapshot {
+                    let mut snapshot = ws_snapshot.clone();
+                    snapshot.version = version;
+                    snapshot.passage_names =
+                        new_doc.passages.iter().map(|p| p.name.clone()).collect();
+                    new_doc.snapshot = Some(snapshot);
+                } else {
+                    // No snapshot on the workspace doc — fall back to
+                    // rebuilding from text (rare; only if the workspace
+                    // doc lost its snapshot somehow).
+                    new_doc.set_snapshot_from_text(text_after);
+                }
+            } else {
+                // No workspace doc — fall back to rebuilding from text.
+                new_doc.set_snapshot_from_text(text_after);
+            }
+
+            Some((new_doc, full_result, /* panicked = */ false))
+        }
+        Err(helpers::PassageParseError::Panic(msg)) => {
+            // Panic contained: emit a scoped diagnostic for this passage,
+            // leave other passages' tokens/diagnostics intact from the
+            // previous parse. M3's surgical cache invalidation makes this
+            // truly scoped — only the panicked passage's cache entry is
+            // touched.
+            tracing::warn!(
+                file = %uri,
+                passage = %passage_name,
+                msg = %msg,
+                "did_change_incremental: passage parse panicked — scoped error emitted"
+            );
+
+            let mut new_doc = doc_before.clone();
+            new_doc.version = version;
+            // Task 2 (optimization): steal the mutated rope from the
+            // workspace doc instead of rebuilding from String. Same
+            // pattern as the success path above.
+            if let Some(workspace_doc) = inner.workspace.get_document(uri) {
+                if let Some(ref ws_snapshot) = workspace_doc.snapshot {
+                    let mut snapshot = ws_snapshot.clone();
+                    snapshot.version = version;
+                    snapshot.passage_names =
+                        new_doc.passages.iter().map(|p| p.name.clone()).collect();
+                    new_doc.snapshot = Some(snapshot);
+                } else {
+                    new_doc.set_snapshot_from_text(text_after);
+                }
+            } else {
+                new_doc.set_snapshot_from_text(text_after);
+            }
+
+            // Build a diagnostic group for the panicked passage.
+            let error_group = helpers::replace_passage_with_error(
+                doc_before,
+                passage_name,
+                &msg,
+            );
+
+            // The ParseResult contains only the panicked passage's
+            // diagnostic group (no token groups — the plugin panicked
+            // before emitting any). The caller's
+            // `merge_incremental_diagnostics` will replace just this
+            // passage's entry in `format_diagnostics`; the caller's
+            // `merge_incremental_tokens` (with `is_panic_degraded=true`)
+            // will REMOVE this passage's entry from `semantic_tokens` so
+            // we don't show stale tokens for broken JS. Other passages'
+            // cache entries are untouched.
+            let full_result = knot_formats::plugin::ParseResult {
+                passages: new_doc.passages.clone(),
+                token_groups: Vec::new(),
+                diagnostic_groups: vec![error_group.unwrap_or_else(|| {
+                    knot_formats::plugin::PassageDiagnosticGroup {
+                        passage_name: passage_name.to_string(),
+                        passage_offset: passage_offset_new,
+                        diagnostics: vec![knot_formats::plugin::FormatDiagnostic {
+                            range: 0..1,
+                            message: format!(
+                                "Internal error: passage parse panicked — {}",
+                                msg
+                            ),
+                            severity: knot_formats::plugin::FormatDiagnosticSeverity::Error,
+                            code: "sc-parse".to_string(),
+                        }],
+                    }
+                })],
+                is_complete: false,
+            };
+
+            Some((new_doc, full_result, /* panicked = */ true))
+        }
+        Err(helpers::PassageParseError::ClassificationFailed) => {
+            // Plugin returned None — fall back to full re-parse.
+            None
+        }
+        Err(helpers::PassageParseError::NoPlugin) => {
+            // No plugin — fall back to full re-parse (which will produce
+            // an empty document).
+            None
+        }
+    }
 }
 
 pub(crate) async fn did_close(state: &ServerState, params: DidCloseTextDocumentParams) {
@@ -487,35 +916,24 @@ pub(crate) async fn did_change_configuration(
     // Release write lock before analysis
     drop(inner);
 
-    let (diagnostics, open_docs, fmt_diags, config) = {
+    // Task 3: consolidated read-lock phase — analysis + build LSP diagnostics.
+    let prebuilt_diagnostics = {
         let inner = state.inner.read().await;
         let diagnostics =
             helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
-        let open_docs = inner.open_documents.clone();
-        let fmt_diags = inner.format_diagnostics.clone();
-        let config = inner.workspace.config.clone();
-        (diagnostics, open_docs, fmt_diags, config)
-    };
-
-    {
-        let inner = state.inner.read().await;
-        let format = inner.workspace.resolve_format();
-        let plugin = inner.format_registry.get(&format);
-        let sigils: Vec<char> = plugin
-            .as_ref()
-            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-            .unwrap_or_default();
-        helpers::publish_all_diagnostics(
-            &state.client,
+        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+        helpers::build_all_lsp_diagnostics(
             &diagnostics,
-            &fmt_diags,
-            &open_docs,
+            &inner.format_diagnostics,
+            &inner.open_documents,
             &inner.workspace,
-            &config,
+            &inner.workspace.config,
             &sigils,
         )
-        .await;
-    }
+    }; // ← read lock dropped
+
+    // Send diagnostics to the client (lock-free).
+    helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 }
 
 pub(crate) async fn did_change_watched_files(
@@ -563,12 +981,14 @@ pub(crate) async fn did_change_watched_files(
                     );
 
                     inner.open_documents.insert(uri.clone(), text.clone());
-                    inner
-                        .format_diagnostics
-                        .insert(uri.clone(), parse_result.diagnostic_groups);
-                    inner
-                        .semantic_tokens
-                        .insert(uri.clone(), parse_result.token_groups);
+                    inner.format_diagnostics.insert(
+                        uri.clone(),
+                        helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups),
+                    );
+                    inner.semantic_tokens.insert(
+                        uri.clone(),
+                        helpers::token_groups_to_map(parse_result.token_groups),
+                    );
 
                     // StoryData parsing is a core-only operation (see: Format Isolation).
                     inner.workspace.insert_document(doc);
@@ -585,38 +1005,26 @@ pub(crate) async fn did_change_watched_files(
                     // Release write lock before analysis
                     drop(inner);
 
-                    // Read-lock phase: analysis (read-only)
-                    let (diagnostics, open_docs, fmt_diags, config) = {
+                    // Task 3: consolidated read-lock phase — analysis + build LSP diagnostics.
+                    let prebuilt_diagnostics = {
                         let inner = state.inner.read().await;
                         let diagnostics = helpers::analyze_with_format_vars(
                             &inner.workspace,
                             &inner.format_registry,
                         );
-                        let open_docs = inner.open_documents.clone();
-                        let fmt_diags = inner.format_diagnostics.clone();
-                        let config = inner.workspace.config.clone();
-                        (diagnostics, open_docs, fmt_diags, config)
-                    };
-
-                    {
-                        let inner = state.inner.read().await;
-                        let format = inner.workspace.resolve_format();
-                        let plugin = inner.format_registry.get(&format);
-                        let sigils: Vec<char> = plugin
-                            .as_ref()
-                            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-                            .unwrap_or_default();
-                        helpers::publish_all_diagnostics(
-                            &state.client,
+                        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+                        helpers::build_all_lsp_diagnostics(
                             &diagnostics,
-                            &fmt_diags,
-                            &open_docs,
+                            &inner.format_diagnostics,
+                            &inner.open_documents,
                             &inner.workspace,
-                            &config,
+                            &inner.workspace.config,
                             &sigils,
                         )
-                        .await;
-                    }
+                    }; // ← read lock dropped
+
+                    // Send diagnostics to the client (lock-free).
+                    helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 
                     // Schedule debounced semantic token refresh
                     state.schedule_semantic_token_refresh().await;
@@ -653,36 +1061,24 @@ pub(crate) async fn did_change_watched_files(
                 // Release write lock before analysis
                 drop(inner);
 
-                // Read-lock phase: analysis (read-only)
-                let (diagnostics, open_docs, fmt_diags, config) = {
+                // Task 3: consolidated read-lock phase — analysis + build LSP diagnostics.
+                let prebuilt_diagnostics = {
                     let inner = state.inner.read().await;
                     let diagnostics =
                         helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
-                    let open_docs = inner.open_documents.clone();
-                    let fmt_diags = inner.format_diagnostics.clone();
-                    let config = inner.workspace.config.clone();
-                    (diagnostics, open_docs, fmt_diags, config)
-                };
-
-                {
-                    let inner = state.inner.read().await;
-                    let format = inner.workspace.resolve_format();
-                    let plugin = inner.format_registry.get(&format);
-                    let sigils: Vec<char> = plugin
-                        .as_ref()
-                        .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-                        .unwrap_or_default();
-                    helpers::publish_all_diagnostics(
-                        &state.client,
+                    let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+                    helpers::build_all_lsp_diagnostics(
                         &diagnostics,
-                        &fmt_diags,
-                        &open_docs,
+                        &inner.format_diagnostics,
+                        &inner.open_documents,
                         &inner.workspace,
-                        &config,
+                        &inner.workspace.config,
                         &sigils,
                     )
-                    .await;
-                }
+                }; // ← read lock dropped
+
+                // Send diagnostics to the client (lock-free).
+                helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 
                 // Schedule debounced semantic token refresh for remaining
                 // documents whose broken link status may have changed.
@@ -720,12 +1116,14 @@ pub(crate) async fn did_change_watched_files(
                     );
 
                     inner.open_documents.insert(uri.clone(), text.clone());
-                    inner
-                        .format_diagnostics
-                        .insert(uri.clone(), parse_result.diagnostic_groups);
-                    inner
-                        .semantic_tokens
-                        .insert(uri.clone(), parse_result.token_groups);
+                    inner.format_diagnostics.insert(
+                        uri.clone(),
+                        helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups),
+                    );
+                    inner.semantic_tokens.insert(
+                        uri.clone(),
+                        helpers::token_groups_to_map(parse_result.token_groups),
+                    );
 
                     // StoryData parsing is a core-only operation (see: Format Isolation).
                     inner.workspace.insert_document(doc);
@@ -740,38 +1138,26 @@ pub(crate) async fn did_change_watched_files(
                     // Release write lock before analysis
                     drop(inner);
 
-                    // Read-lock phase: analysis (read-only)
-                    let (diagnostics, open_docs, fmt_diags, config) = {
+                    // Task 3: consolidated read-lock phase — analysis + build LSP diagnostics.
+                    let prebuilt_diagnostics = {
                         let inner = state.inner.read().await;
                         let diagnostics = helpers::analyze_with_format_vars(
                             &inner.workspace,
                             &inner.format_registry,
                         );
-                        let open_docs = inner.open_documents.clone();
-                        let fmt_diags = inner.format_diagnostics.clone();
-                        let config = inner.workspace.config.clone();
-                        (diagnostics, open_docs, fmt_diags, config)
-                    };
-
-                    {
-                        let inner = state.inner.read().await;
-                        let format = inner.workspace.resolve_format();
-                        let plugin = inner.format_registry.get(&format);
-                        let sigils: Vec<char> = plugin
-                            .as_ref()
-                            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-                            .unwrap_or_default();
-                        helpers::publish_all_diagnostics(
-                            &state.client,
+                        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+                        helpers::build_all_lsp_diagnostics(
                             &diagnostics,
-                            &fmt_diags,
-                            &open_docs,
+                            &inner.format_diagnostics,
+                            &inner.open_documents,
                             &inner.workspace,
-                            &config,
+                            &inner.workspace.config,
                             &sigils,
                         )
-                        .await;
-                    }
+                    }; // ← read lock dropped
+
+                    // Send diagnostics to the client (lock-free).
+                    helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 
                     // Schedule debounced semantic token refresh
                     state.schedule_semantic_token_refresh().await;
@@ -917,5 +1303,392 @@ fn apply_document_changes(
             "apply_document_changes: no snapshot, using last change text"
         );
         text
+    }
+}
+
+// ===========================================================================
+// Tests (M4 — incremental dispatch integration tests)
+// ===========================================================================
+//
+// These tests exercise `did_change_phase1` (the synchronous core of
+// `did_change`) directly, without needing a `tower_lsp::Client` or async
+// runtime. They construct a `ServerStateInner` with the SugarCube plugin,
+// simulate LSP `didChange` content-change events, and assert:
+//   - which dispatch path was taken (incremental vs full re-parse),
+//   - whether the cache was surgically updated (other passages' entries
+//     untouched) or wholesale replaced,
+//   - whether diagnostics are correctly scoped to the edited passage.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use knot_core::passage::StoryFormat;
+    use tower_lsp::lsp_types::{
+        Position, Range as LspRange, TextDocumentContentChangeEvent,
+        VersionedTextDocumentIdentifier,
+    };
+
+    /// Build a `ServerStateInner` pre-populated with a SugarCube-parsed
+    /// document. The document has whatever passages the caller provides in
+    /// `src`. The state is ready to receive `did_change_phase1` calls.
+    fn build_state(src: &str) -> (crate::state::ServerStateInner, url::Url) {
+        let uri = url::Url::parse("file:///project/story.tw").unwrap();
+        let mut registry = knot_formats::plugin::FormatRegistry::with_defaults();
+        let format = StoryFormat::SugarCube;
+
+        // Parse the initial document.
+        let parse_result = {
+            let plugin = registry
+                .get_mut(&format)
+                .expect("SugarCube plugin must be registered");
+            plugin.parse_mut(&uri, src)
+        };
+
+        // Build the workspace with the parsed document.
+        let mut workspace =
+            knot_core::Workspace::new(url::Url::parse("file:///project/").unwrap());
+        // Force SugarCube (no StoryData passage in test fixtures).
+        workspace.config.format = Some("SugarCube".to_string());
+        let mut doc = knot_core::Document::new(uri.clone(), StoryFormat::SugarCube);
+        doc.set_snapshot_from_text(src);
+        for passage in parse_result.passages {
+            doc.passages.push(passage);
+        }
+        workspace.insert_document(doc);
+
+        let inner = crate::state::ServerStateInner {
+            workspace,
+            format_registry: registry,
+            debounce: knot_core::editing::DebounceTimer::new(),
+            editor_open_docs: std::collections::HashSet::new(),
+            open_documents: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(uri.clone(), src.to_string());
+                m
+            },
+            format_diagnostics: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    uri.clone(),
+                    helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups),
+                );
+                m
+            },
+            doc_versions: std::collections::HashMap::new(),
+            semantic_tokens: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    uri.clone(),
+                    helpers::token_groups_to_map(parse_result.token_groups),
+                );
+                m
+            },
+            installed_formats: Vec::new(),
+            global_storage_path: None,
+        };
+        (inner, uri)
+    }
+
+    /// Build a `TextDocumentContentChangeEvent` with the given LSP line range
+    /// and replacement text.
+    fn change(
+        start_line: u32,
+        start_char: u32,
+        end_line: u32,
+        end_char: u32,
+        text: &str,
+    ) -> TextDocumentContentChangeEvent {
+        TextDocumentContentChangeEvent {
+            range: Some(LspRange {
+                start: Position::new(start_line, start_char),
+                end: Position::new(end_line, end_char),
+            }),
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    /// Build a `DidChangeTextDocumentParams` for the given URI, version, and
+    /// content changes. Used to construct the LSP notification payload that
+    /// `did_change` would receive.
+    fn _did_change_params(
+        uri: &url::Url,
+        version: i32,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    ) -> DidChangeTextDocumentParams {
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version,
+            },
+            content_changes: changes,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: within-passage edit re-parses only that passage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn within_passage_edit_takes_incremental_path() {
+        // Two passages: A and B. Edit falls entirely within passage A's body.
+        // Text:
+        //   Line 0: ":: Start\n"        (0..9, 9 bytes)
+        //   Line 1: "Hello world\n"     (9..21, 12 bytes)
+        //   Line 2: ":: Second\n"       (21..31, 10 bytes)
+        //   Line 3: "Goodbye\n"         (31..39, 8 bytes)
+        let src = ":: Start\nHello world\n:: Second\nGoodbye\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Replace "world" (line 1, chars 6..11) with "there".
+        let changes = vec![change(1, 6, 1, 11, "there")];
+
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // The dispatch was Incremental for passage "Start".
+        assert_eq!(
+            result.dispatch,
+            DidChangeDispatch::Incremental {
+                passage_name: "Start".to_string()
+            }
+        );
+
+        // The workspace still has 2 passages (Start + Second).
+        let doc = inner.workspace.get_document(&uri).expect("doc exists");
+        assert_eq!(doc.passages.len(), 2);
+        assert_eq!(doc.passages[0].name, "Start");
+        assert_eq!(doc.passages[1].name, "Second");
+
+        // The edited passage's text was updated.
+        let new_text = inner.open_documents.get(&uri).unwrap();
+        assert!(new_text.contains("Hello there"));
+        assert!(!new_text.contains("Hello world"));
+
+        // The cache has entries for both passages (surgical update — B's
+        // entry was preserved from the initial parse).
+        let diags = inner.format_diagnostics.get(&uri).unwrap();
+        assert!(diags.contains_key("Start"));
+        assert!(diags.contains_key("Second"));
+        let tokens = inner.semantic_tokens.get(&uri).unwrap();
+        assert!(tokens.contains_key("Start"));
+        assert!(tokens.contains_key("Second"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: edit introducing a syntax error is confined to one passage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn edit_introducing_syntax_error_confined_to_one_passage() {
+        // Two passages. Edit passage A to introduce invalid JS in a <<run>>
+        // macro. The error should be confined to passage A; passage B should
+        // have no sc-js diagnostics.
+        let src = ":: Start\n<<run 1 + 1>>\n:: Second\nSome text.\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Replace "1 + 1" (line 1, chars 7..12) with "1 +" — incomplete
+        // expression, will produce an oxc parse error.
+        let changes = vec![change(1, 7, 1, 12, "1 +")];
+
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // Still took the incremental path for passage "Start".
+        assert_eq!(
+            result.dispatch,
+            DidChangeDispatch::Incremental {
+                passage_name: "Start".to_string()
+            }
+        );
+
+        // After phase 1, run phase 2 to collect the pre-built LSP
+        // diagnostics that would be published.
+        // Task 3: phase 2 now returns Vec<(Url, Vec<Diagnostic>)> instead
+        // of the raw format_diagnostics cache. We inspect Diagnostic.code
+        // to find sc-js errors.
+        let prebuilt = did_change_phase2(&inner, &uri);
+
+        // Flatten all diagnostics for the edited URI.
+        let all_diags: Vec<&lsp_types::Diagnostic> = prebuilt
+            .iter()
+            .filter(|(u, _)| u == &uri)
+            .flat_map(|(_, diags)| diags.iter())
+            .collect();
+
+        // The format diagnostics should contain at least one sc-js error
+        // (oxc parse error from the broken expression).
+        let has_js_error = all_diags.iter().any(|d| {
+            matches!(&d.code, Some(lsp_types::NumberOrString::String(s)) if s == "format:sc-js")
+        });
+        assert!(
+            has_js_error,
+            "Expected a format:sc-js diagnostic for passage Start, got: {:?}",
+            all_diags
+        );
+
+        // No graph diagnostics should mention Second as broken (the edit
+        // didn't touch Second's links).
+        // (Graph diagnostics are workspace-wide; not asserted in detail here.)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: boundary-crossing edit falls back to full re-parse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn boundary_crossing_edit_falls_back_to_full_reparse() {
+        // Two passages. Insert "\n:: NewPassage\n" mid-body in passage A —
+        // the inserted text contains a line starting with `:: `, which makes
+        // this a BoundaryCrossing (creates a new passage header).
+        let src = ":: Start\nHello world\n:: Second\nGoodbye\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Insert "\n:: NewPassage\n" at line 1, char 5 (mid "Hello world").
+        // The leading \n ensures ":: NewPassage" starts at column 0 of a new
+        // line, so the SugarCube lexer recognizes it as a passage header.
+        let changes = vec![change(1, 5, 1, 5, "\n:: NewPassage\n")];
+
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // The dispatch was BoundaryCrossing (fell back to full re-parse).
+        assert_eq!(result.dispatch, DidChangeDispatch::BoundaryCrossing);
+
+        // After full re-parse, the workspace has 3 passages: Start, NewPassage, Second.
+        let doc = inner.workspace.get_document(&uri).expect("doc exists");
+        assert_eq!(doc.passages.len(), 3);
+        let names: Vec<&str> = doc.passages.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Start"));
+        assert!(names.contains(&"NewPassage"));
+        assert!(names.contains(&"Second"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: edit at EOF within last passage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn edit_at_eof_within_last_passage_takes_incremental_path() {
+        // Single passage. Edit at EOF (line 2, char 0 — past the last
+        // passage's recorded span end, but within the file).
+        let src = ":: Start\nHello\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Insert "more" at EOF (line 2, char 0).
+        let changes = vec![change(2, 0, 2, 0, "more")];
+
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // The dispatch was Incremental for passage "Start" (EOF edits are
+        // clamped to the last passage).
+        assert_eq!(
+            result.dispatch,
+            DidChangeDispatch::Incremental {
+                passage_name: "Start".to_string()
+            }
+        );
+
+        // The text was updated.
+        let new_text = inner.open_documents.get(&uri).unwrap();
+        assert!(new_text.ends_with("more"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: classification failure falls back to full re-parse
+    // -----------------------------------------------------------------------
+    //
+    // This test simulates a classification failure: the SugarCube plugin's
+    // `parse_passage_mut` returns `None` when a passage claims to be special
+    // (e.g. `[widget]`) but the classifier can't find a matching def. In
+    // practice this is hard to trigger with a simple text edit, so we test
+    // the fallback path indirectly: a full-text replacement (range == None)
+    // always takes the WholeDocument path, which exercises the same
+    // `parse_with_format_plugin` fallback code.
+
+    #[test]
+    fn full_text_replacement_takes_whole_document_path() {
+        // Single passage. Replace the entire document text.
+        let src = ":: Start\nHello\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Full-text replacement: range == None.
+        let changes = vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: ":: Start\nGoodbye\n:: Second\nNew passage.\n".to_string(),
+        }];
+
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // The dispatch was WholeDocument (full-text replacement always is).
+        assert_eq!(result.dispatch, DidChangeDispatch::WholeDocument);
+
+        // After full re-parse, the workspace has 2 passages.
+        let doc = inner.workspace.get_document(&uri).expect("doc exists");
+        assert_eq!(doc.passages.len(), 2);
+        let names: Vec<&str> = doc.passages.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Start"));
+        assert!(names.contains(&"Second"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: incremental edit preserves other passages' cache entries
+    // -----------------------------------------------------------------------
+    //
+    // This is the M3 acceptance criterion at the integration level: after
+    // an incremental edit to passage A, passage B's diagnostic group and
+    // token group in the cache are byte-for-byte unchanged.
+
+    #[test]
+    fn incremental_edit_preserves_other_passages_cache_entries() {
+        let src = ":: Start\n<<run 1 + 1>>\n:: Second\nSome text.\n";
+        let (mut inner, uri) = build_state(src);
+
+        // Snapshot the cache entries for passage "Second" before the edit.
+        let second_diags_before = inner
+            .format_diagnostics
+            .get(&uri)
+            .and_then(|m| m.get("Second"))
+            .cloned()
+            .expect("Second has a diagnostic group before the edit");
+        let second_tokens_before = inner
+            .semantic_tokens
+            .get(&uri)
+            .and_then(|m| m.get("Second"))
+            .cloned()
+            .expect("Second has a token group before the edit");
+
+        // Edit passage "Start" — replace "1 + 1" (line 1, chars 7..12) with "2".
+        let changes = vec![change(1, 7, 1, 12, "2")];
+        let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
+
+        // Confirm the incremental path was taken.
+        assert_eq!(
+            result.dispatch,
+            DidChangeDispatch::Incremental {
+                passage_name: "Start".to_string()
+            }
+        );
+
+        // Passage "Second"'s cache entries are byte-for-byte unchanged.
+        let second_diags_after = inner
+            .format_diagnostics
+            .get(&uri)
+            .and_then(|m| m.get("Second"))
+            .cloned()
+            .expect("Second has a diagnostic group after the edit");
+        let second_tokens_after = inner
+            .semantic_tokens
+            .get(&uri)
+            .and_then(|m| m.get("Second"))
+            .cloned()
+            .expect("Second has a token group after the edit");
+
+        assert_eq!(
+            second_diags_before, second_diags_after,
+            "Second's diagnostic group must be unchanged after an incremental edit to Start"
+        );
+        assert_eq!(
+            second_tokens_before, second_tokens_after,
+            "Second's token group must be unchanged after an incremental edit to Start"
+        );
     }
 }

@@ -752,74 +752,74 @@ pub fn walk_script_js(
 ) {
     use crate::sugarcube::js::js_preprocess;
     use crate::sugarcube::js::js_walk;
-    use knot_core::oxc::{ParseMode as JsParseMode, parse_js};
+    use knot_core::oxc::{parse_and_visit, ParseMode as JsParseMode};
 
     let preprocessed = js_preprocess::preprocess_for_oxc(body_text, true);
 
     // oxc has error recovery — walk whatever AST we can get, even if there
     // are syntax errors. The valid parts still contribute to the registries.
-    let outcome = parse_js(&preprocessed.source, JsParseMode::Module);
-    if let Some(()) = outcome.with_program(|program| {
-        let analysis = js_walk::walk_script_passage(program, &preprocessed);
+    let (_outcome, _) = parse_and_visit(
+        &preprocessed.source,
+        JsParseMode::Module,
+        |program| {
+            let analysis = js_walk::walk_script_passage(program, &preprocessed);
 
-        // Record variable operations
-        let vtree = registry.variables_mut();
-        for op in &analysis.var_ops {
-            vtree.record_var(
-                &op.name,
-                op.is_temporary,
-                op.access_kind,
-                &cp.header.name,
-                file_uri,
-                op.span.clone(),
-                &op.property_path,
-                body_text,
-                &op.segment_spans,
-                op.construct_span.clone(),
-                &op.segment_construct_spans,
-            );
-        }
+            // Record variable operations
+            let vtree = registry.variables_mut();
+            for op in &analysis.var_ops {
+                vtree.record_var(
+                    &op.name,
+                    op.is_temporary,
+                    op.access_kind,
+                    &cp.header.name,
+                    file_uri,
+                    op.span.clone(),
+                    &op.property_path,
+                    body_text,
+                    &op.segment_spans,
+                    op.construct_span.clone(),
+                    &op.segment_construct_spans,
+                );
+            }
 
-        // Record definitions
-        let (macro_reg, func_reg, template_reg) = registry.definition_registries_mut();
-        for macro_add in &analysis.macro_adds {
-            macro_reg.register_macro_add(
-                &macro_add.name,
-                &cp.header.name,
-                file_uri,
-                macro_add.name_offset,
-                None,
-                macro_add.body,
-            );
-        }
-        for template_add in &analysis.template_adds {
-            let kind = if template_add.is_string {
-                TemplateKind::String
-            } else {
-                TemplateKind::Function
-            };
-            template_reg.register_template(
-                &template_add.name,
-                kind,
-                &cp.header.name,
-                file_uri,
-                template_add.name_offset,
-            );
-        }
-        for func_def in &analysis.function_defs {
-            func_reg.register_function(
-                &func_def.name,
-                FunctionKind::Declaration,
-                &cp.header.name,
-                file_uri,
-                func_def.name_offset,
-                func_def.param_count,
-            );
-        }
-        // Return () from the closure
-    }) {
-        // AST was available and walked — registries populated
-    }
+            // Record definitions
+            let (macro_reg, func_reg, template_reg) = registry.definition_registries_mut();
+            for macro_add in &analysis.macro_adds {
+                macro_reg.register_macro_add(
+                    &macro_add.name,
+                    &cp.header.name,
+                    file_uri,
+                    macro_add.name_offset,
+                    None,
+                    macro_add.body,
+                );
+            }
+            for template_add in &analysis.template_adds {
+                let kind = if template_add.is_string {
+                    TemplateKind::String
+                } else {
+                    TemplateKind::Function
+                };
+                template_reg.register_template(
+                    &template_add.name,
+                    kind,
+                    &cp.header.name,
+                    file_uri,
+                    template_add.name_offset,
+                );
+            }
+            for func_def in &analysis.function_defs {
+                func_reg.register_function(
+                    &func_def.name,
+                    FunctionKind::Declaration,
+                    &cp.header.name,
+                    file_uri,
+                    func_def.name_offset,
+                    func_def.param_count,
+                );
+            }
+        },
+    );
 }
 
 /// Detect whether the `container` keyword appears in widget args.

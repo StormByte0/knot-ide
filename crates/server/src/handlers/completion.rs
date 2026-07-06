@@ -90,7 +90,14 @@ pub(crate) async fn completion(
         if plugin.is_some() { "Some" } else { "None" }
     );
 
-    let token_groups = inner.semantic_tokens.get(&uri).cloned().unwrap_or_default();
+    // M3: the cache is now HashMap<String, PassageTokenGroup> keyed by
+    // passage name. The plugin's `provide_completions` expects
+    // &[PassageTokenGroup] in source order, so we extract the values and
+    // sort by passage_offset.
+    let token_groups_map = inner.semantic_tokens.get(&uri).cloned().unwrap_or_default();
+    let mut token_groups: Vec<knot_formats::plugin::PassageTokenGroup> =
+        token_groups_map.into_values().collect();
+    token_groups.sort_by_key(|g| g.passage_offset);
 
     // ── Delegate to format plugin ─────────────────────────────────────
     //

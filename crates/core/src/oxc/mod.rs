@@ -2,7 +2,8 @@
 //!
 //! This module provides the **JS side** of the two-parser model. It is a pure
 //! parsing service: it takes JavaScript source text and a parse mode, and
-//! returns either syntax diagnostics (on error) or the parsed AST (on success).
+//! returns either syntax diagnostics (on error) or invokes a visitor on the
+//! parsed AST (on success / recoverable error).
 //!
 //! ## Design
 //!
@@ -13,9 +14,10 @@
 //!    `PassageNode` tree for `<<run>>`, `<<set>>`, `<<script>>` blocks)
 //! 2. Pre-processes the snippets (e.g. SugarCube substitutes `$var` with
 //!    `State_variables_varName` so Oxc sees valid JS identifiers)
-//! 3. Calls [`parse_js()`] with the pre-processed source
+//! 3. Calls [`parse_js()`] (for diagnostics only) or [`parse_and_visit()`]
+//!    (to also walk the AST) with the pre-processed source
 //! 4. Handles the result:
-//!    - Walk the AST via `outcome.with_program()` for token highlighting
+//!    - Walk the AST via the `parse_and_visit` visitor for token highlighting
 //!      (works even with recoverable errors — oxc produces a partial AST)
 //!    - Check `outcome.diagnostics` for error reporting (precise squiggles)
 //!
@@ -32,10 +34,9 @@
 pub mod parser;
 pub mod types;
 
-pub use parser::parse_js;
+pub use parser::{parse_and_visit, parse_js};
 pub use types::{JsDiagnostic, JsDiagnosticSeverity, JsParseOutcome, ParseMode};
 
 // Re-export oxc types that formats need for AST walking.
 // This way formats only depend on knot-core, not on oxc crates directly.
-pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;

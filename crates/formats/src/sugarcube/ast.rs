@@ -92,6 +92,17 @@ pub struct JsAnalysis {
     /// `Error`, `Promise`, `Set`, `Map`, `Symbol`, `WeakMap`, `WeakSet`).
     /// The token builder emits these as `Namespace` semantic tokens.
     pub js_global_spans: Vec<std::ops::Range<usize>>,
+    /// JS syntax diagnostics from oxc (Task 1 — optimization).
+    ///
+    /// Populated by `annotate_js` during `parse_and_visit`. Consumers
+    /// (`validate_script_passage`) read these instead of re-parsing the
+    /// same source, eliminating the per-passage JS double-parse.
+    ///
+    /// Positions are in the **preprocessed** source coordinate system
+    /// (after `$var` substitution, keyword operator normalization, etc.).
+    /// The caller is responsible for mapping back to original coordinates
+    /// via `PreprocessedJs::map_to_original`.
+    pub diagnostics: Vec<knot_core::oxc::JsDiagnostic>,
 }
 
 /// A variable operation extracted by the oxc AST walker.
@@ -1347,6 +1358,14 @@ pub struct JsSnippet {
     pub macro_name: String,
     /// Whether this is a full script block (vs an inline expression).
     pub is_block: bool,
+    /// Pre-collected oxc diagnostics from `annotate_js`'s `parse_and_visit`
+    /// call (Task 1b — optimization). `validate_snippet` consumes these
+    /// instead of re-parsing the same source.
+    ///
+    /// Positions are in the **preprocessed** source coordinate system.
+    /// `validate_snippet` maps them back to original coordinates via
+    /// `PreprocessedJs::map_to_original`.
+    pub diagnostics: Vec<knot_core::oxc::JsDiagnostic>,
 }
 
 /// Collect JS snippets from the AST for oxc validation.
@@ -1381,9 +1400,17 @@ fn collect_js_snippets_recursive(
             open_span,
             children,
             set_assignment,
+            js_analysis,
             ..
         } = node
         {
+            // Task 1b: extract pre-collected diagnostics from the node's
+            // js_analysis (populated by annotate_js). validate_snippet will
+            // consume these instead of re-parsing.
+            let node_diagnostics: Vec<knot_core::oxc::JsDiagnostic> = js_analysis
+                .as_ref()
+                .map(|a| a.diagnostics.clone())
+                .unwrap_or_default();
             if BLOCK_JS_MACROS.contains(&name.as_str()) {
                 // <<script>> blocks: the body is JS
                 if let Some(ch) = children {
@@ -1404,6 +1431,7 @@ fn collect_js_snippets_recursive(
                             body_offset: body_start,
                             macro_name: name.clone(),
                             is_block: true,
+                            diagnostics: node_diagnostics,
                         });
                     }
                 }
@@ -1439,6 +1467,7 @@ fn collect_js_snippets_recursive(
                                 body_offset: expr_body_offset,
                                 macro_name: "set".to_string(),
                                 is_block: false,
+                                diagnostics: node_diagnostics,
                             });
                         }
                     }
@@ -1472,6 +1501,7 @@ fn collect_js_snippets_recursive(
                             body_offset: args_body_start,
                             macro_name: "set".to_string(),
                             is_block: false,
+                            diagnostics: node_diagnostics,
                         });
                     }
                 }
@@ -1490,6 +1520,7 @@ fn collect_js_snippets_recursive(
                         body_offset: args_body_start,
                         macro_name: name.clone(),
                         is_block: false,
+                        diagnostics: node_diagnostics,
                     });
                 }
             } else if name != "for"
@@ -1542,6 +1573,7 @@ fn collect_js_snippets_recursive(
                         body_offset: args_body_start,
                         macro_name: name.clone(),
                         is_block: false,
+                        diagnostics: node_diagnostics,
                     });
                 }
             }
@@ -1556,16 +1588,24 @@ fn collect_js_snippets_recursive(
             content,
             kind: _,
             span,
+            js_analysis,
             ..
         } = node
         {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
+                // Task 1b: extract pre-collected diagnostics from the
+                // Expression node's js_analysis.
+                let node_diagnostics: Vec<knot_core::oxc::JsDiagnostic> = js_analysis
+                    .as_ref()
+                    .map(|a| a.diagnostics.clone())
+                    .unwrap_or_default();
                 result.push(JsSnippet {
                     source: trimmed.to_string(),
                     body_offset: span.start,
                     macro_name: "=".to_string(), // <<=>>
                     is_block: false,
+                    diagnostics: node_diagnostics,
                 });
             }
         }

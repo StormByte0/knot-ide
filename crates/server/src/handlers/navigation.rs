@@ -126,7 +126,7 @@ pub(crate) fn resolve_target_at_cursor(
     // Step A: semantic token under cursor.
     let token_groups = inner.semantic_tokens.get(uri).cloned().unwrap_or_default();
     use knot_formats::plugin::SemanticTokenType;
-    for group in &token_groups {
+    for group in token_groups.values() {
         let group_offset = group.passage_offset;
         for token in &group.tokens {
             if token.token_type != SemanticTokenType::Function {
@@ -404,13 +404,13 @@ fn lookup_template_definition(
 fn lookup_function_definition(
     text: &str,
     byte_offset: usize,
-    token_groups: Vec<knot_formats::plugin::PassageTokenGroup>,
+    token_groups: std::collections::HashMap<String, knot_formats::plugin::PassageTokenGroup>,
     plugin: &dyn knot_formats::plugin::FormatPlugin,
     inner: &crate::state::ServerStateInner,
 ) -> Option<Location> {
     use knot_formats::plugin::SemanticTokenType;
 
-    for group in &token_groups {
+    for group in token_groups.values() {
         let group_offset = group.passage_offset;
         for token in &group.tokens {
             if token.token_type != SemanticTokenType::Function {
@@ -785,7 +785,7 @@ fn references_inner(
 
                 // Path A: semantic tokens for this document
                 if let Some(token_groups) = inner.semantic_tokens.get(&doc.uri) {
-                    for group in token_groups {
+                    for group in token_groups.values() {
                         let group_offset = group.passage_offset;
                         for token in &group.tokens {
                             if token.token_type != SemanticTokenType::Function {
@@ -1044,7 +1044,7 @@ fn document_highlight_inner(
 
             // Path A: semantic tokens for this document
             if let Some(token_groups) = inner.semantic_tokens.get(uri) {
-                for group in token_groups {
+                for group in token_groups.values() {
                     let group_offset = group.passage_offset;
                     for token in &group.tokens {
                         if token.token_type != SemanticTokenType::Function {
@@ -1428,7 +1428,7 @@ pub(crate) fn collect_rename_edits(
 
                 // Path A: semantic tokens
                 if let Some(token_groups) = inner.semantic_tokens.get(&doc.uri) {
-                    for group in token_groups {
+                    for group in token_groups.values() {
                         let group_offset = group.passage_offset;
                         for token in &group.tokens {
                             if token.token_type != SemanticTokenType::Function {
@@ -1750,7 +1750,7 @@ mod goto_definition_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), parse_result.token_groups);
+                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
                 m
             },
             installed_formats: Vec::new(),
@@ -2292,7 +2292,7 @@ mod document_highlight_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), parse_result.token_groups);
+                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
                 m
             },
             installed_formats: Vec::new(),

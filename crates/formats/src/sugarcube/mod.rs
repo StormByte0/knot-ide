@@ -598,8 +598,16 @@ impl FormatPluginMut for SugarCubePlugin {
         passage_tags: &[String],
         passage_text: &str,
         file_uri: &str,
-    ) -> Option<Passage> {
-        parse_pipeline::parse_single(self, passage_name, passage_tags, passage_text, file_uri)
+        passage_offset: usize,
+    ) -> Option<ParseResult> {
+        parse_pipeline::parse_single(
+            self,
+            passage_name,
+            passage_tags,
+            passage_text,
+            file_uri,
+            passage_offset,
+        )
     }
 
     fn remove_file_from_registries(&mut self, file_uri: &str) {

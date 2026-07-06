@@ -2533,7 +2533,7 @@ fn emit_namespace_for_member_expr(
 mod tests {
     use super::*;
     use crate::sugarcube::js_preprocess;
-    use knot_core::oxc::{ParseMode as JsParseMode, parse_js};
+    use knot_core::oxc::{parse_and_visit, ParseMode as JsParseMode};
 
     /// Helper: parse JS and walk as script passage, returning the analysis.
     fn walk_script(source: &str) -> JsAnalysis {
@@ -2543,19 +2543,23 @@ mod tests {
             origin_offset: 0,
             wrapping_offset: 0,
         };
-        let outcome = parse_js(source, JsParseMode::Module);
-        outcome
-            .with_program(|program| walk_script_passage(program, &preprocessed))
-            .unwrap_or_default()
+        let (_outcome, analysis) = parse_and_visit(
+            source,
+            JsParseMode::Module,
+            |program| walk_script_passage(program, &preprocessed),
+        );
+        analysis.unwrap_or_default()
     }
 
     /// Helper: parse JS and walk as inline expression, returning the analysis.
     fn walk_inline(source: &str) -> JsAnalysis {
         let preprocessed = js_preprocess::preprocess_for_oxc(source, true);
-        let outcome = parse_js(&preprocessed.source, JsParseMode::Expression);
-        outcome
-            .with_program(|program| walk_inline_js(program, &preprocessed))
-            .unwrap_or_default()
+        let (_outcome, analysis) = parse_and_visit(
+            &preprocessed.source,
+            JsParseMode::Expression,
+            |program| walk_inline_js(program, &preprocessed),
+        );
+        analysis.unwrap_or_default()
     }
 
     #[test]

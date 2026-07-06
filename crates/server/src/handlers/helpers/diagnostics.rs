@@ -68,15 +68,42 @@ pub(crate) fn incoming_link_sources(workspace: &Workspace, passage_name: &str) -
 /// Since LSP `publishDiagnostics` replaces all previous diagnostics for a URI,
 /// both sources must be published together to avoid one source wiping
 /// out another's diagnostics.
-pub(crate) async fn publish_all_diagnostics(
-    client: &tower_lsp::Client,
+/// Build all LSP `Diagnostic` objects for publishing, grouped by URI.
+///
+/// This is the **synchronous** part of diagnostic publishing. It does
+/// everything `publish_all_diagnostics` used to do EXCEPT the
+/// `client.publish_diagnostics(...).await` call. It must be called while
+/// holding a read lock on `ServerStateInner` because it accesses
+/// `workspace` (for related-info computation and passage-name spans),
+/// `format_diagnostics`, `open_documents`, and `config`.
+///
+/// Returns a `Vec<(Url, Vec<Diagnostic>)>` ready for
+/// [`send_lsp_diagnostics`], which sends them to the client WITHOUT
+/// holding any lock.
+///
+/// ## Task 3 (optimization)
+///
+/// Previously, `publish_all_diagnostics` was a single async function that
+/// held the read lock through the `client.publish_diagnostics(...).await`
+/// call, blocking the next write (next keystroke's phase 1). By splitting
+/// build (sync, locked) from send (async, lock-free), we:
+/// - Eliminate one lock acquisition per keystroke.
+/// - Eliminate ~2MB of clones (`open_documents`, `format_diagnostics`,
+///   `config`) that phase 2 used to make for phase 3.
+/// - Make the LSP client await lock-free.
+/// - Get a consistent snapshot (everything read at the same time, no
+///   phase 2 / phase 3 time mismatch).
+pub(crate) fn build_all_lsp_diagnostics(
     graph_diagnostics: &[knot_core::graph::GraphDiagnostic],
-    format_diagnostics: &std::collections::HashMap<Url, Vec<fmt_plugin::PassageDiagnosticGroup>>,
+    format_diagnostics: &std::collections::HashMap<
+        Url,
+        std::collections::HashMap<String, fmt_plugin::PassageDiagnosticGroup>,
+    >,
     open_documents: &std::collections::HashMap<Url, String>,
     workspace: &Workspace,
     config: &knot_core::workspace::KnotConfig,
     sigils: &[char],
-) {
+) -> Vec<(Url, Vec<Diagnostic>)> {
     use std::collections::HashMap as StdHashMap;
 
     // Group graph diagnostics by file URI
@@ -92,6 +119,8 @@ pub(crate) async fn publish_all_diagnostics(
         .chain(format_diagnostics.keys())
         .cloned()
         .collect();
+
+    let mut result = Vec::with_capacity(all_uris.len());
 
     for uri in &all_uris {
         let uri_str = uri.to_string();
@@ -154,7 +183,14 @@ pub(crate) async fn publish_all_diagnostics(
 
         // Add format plugin diagnostics for this file
         if let Some(fmt_diag_groups) = format_diagnostics.get(uri) {
-            for group in fmt_diag_groups {
+            // M3: cache is now HashMap<String, PassageDiagnosticGroup> keyed
+            // by passage name. Sort by passage_offset for deterministic
+            // diagnostic ordering (clients typically sort, but being
+            // deterministic helps testing and reproducibility).
+            let mut sorted_groups: Vec<&fmt_plugin::PassageDiagnosticGroup> =
+                fmt_diag_groups.values().collect();
+            sorted_groups.sort_by_key(|g| g.passage_offset);
+            for group in sorted_groups {
                 let offset = group.passage_offset;
                 for fd in &group.diagnostics {
                     // Convert passage-relative range to document-absolute range
@@ -184,10 +220,48 @@ pub(crate) async fn publish_all_diagnostics(
             }
         }
 
+        result.push((uri.clone(), lsp_diagnostics));
+    }
+
+    result
+}
+
+/// Send pre-built LSP diagnostics to the client, lock-free.
+///
+/// This is the **asynchronous** part of diagnostic publishing. It iterates
+/// the `Vec<(Url, Vec<Diagnostic>)>` produced by [`build_all_lsp_diagnostics`]
+/// and calls `client.publish_diagnostics(...).await` for each URI.
+///
+/// **No state access** — this function does not touch `ServerStateInner` at
+/// all. It can be called WITHOUT holding any lock, which means the LSP
+/// client await does not block the next write (next keystroke's phase 1).
+///
+/// See [`build_all_lsp_diagnostics`] for the Task 3 rationale.
+pub(crate) async fn send_lsp_diagnostics(
+    client: &tower_lsp::Client,
+    prebuilt: Vec<(Url, Vec<Diagnostic>)>,
+) {
+    for (uri, lsp_diagnostics) in prebuilt {
         client
-            .publish_diagnostics(uri.clone(), lsp_diagnostics, None)
+            .publish_diagnostics(uri, lsp_diagnostics, None)
             .await;
     }
+}
+
+/// Compute the variable sigils for the active format plugin (Task 3 helper).
+///
+/// Extracted from the repeated pattern in every `publish_all_diagnostics`
+/// caller. The sigils are used by `build_related_information_for_push` for
+/// variable-name extraction in `UninitializedVariable` diagnostics.
+pub(crate) fn compute_sigils(
+    registry: &fmt_plugin::FormatRegistry,
+    workspace: &Workspace,
+) -> Vec<char> {
+    let format = workspace.resolve_format();
+    registry
+        .get(&format)
+        .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
+        .unwrap_or_default()
 }
 
 // ===========================================================================

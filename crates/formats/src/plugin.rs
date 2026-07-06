@@ -2017,14 +2017,32 @@ pub trait FormatPluginMut: FormatPlugin {
     }
 
     /// Re-parse a single passage incrementally.
+    ///
     /// The plugin MUST call `registry.remove_passage(name, uri)` before populating.
+    ///
+    /// `passage_offset` is the document-absolute byte offset of the passage's
+    /// `::` header. The plugin should set `passage.passage_offset = passage_offset`
+    /// on the returned `Passage` so it can be spliced directly into the
+    /// document's passage list. All other spans on the passage (and its
+    /// internal links/vars/blocks) remain **passage-relative** (0 = passage
+    /// head `::`).
+    ///
+    /// Returns a `ParseResult` containing:
+    /// - `passages`: single-element vec with the re-parsed passage.
+    /// - `diagnostic_groups`: single-element vec with this passage's diagnostics.
+    /// - `token_groups`: single-element vec with this passage's semantic tokens.
+    ///
+    /// Returns `None` if the plugin's passage classifier could not classify
+    /// the passage (e.g. a `[widget]` passage lost its tag). The caller should
+    /// fall back to a full-file re-parse.
     fn parse_passage_mut(
         &mut self,
         passage_name: &str,
         passage_tags: &[String],
         passage_text: &str,
         file_uri: &str,
-    ) -> Option<Passage>;
+        passage_offset: usize,
+    ) -> Option<ParseResult>;
 
     /// Remove all registry entries for a file.
     fn remove_file_from_registries(&mut self, file_uri: &str);

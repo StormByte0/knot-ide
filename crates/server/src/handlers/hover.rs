@@ -69,7 +69,14 @@ pub(crate) async fn hover(
 
     // Fetch semantic tokens for entity detection (functions, templates,
     // properties) that don't have dedicated span data on `Passage`.
-    let token_groups = inner.semantic_tokens.get(&uri).cloned().unwrap_or_default();
+    //
+    // M3: the cache is now HashMap<String, PassageTokenGroup> keyed by
+    // passage name. The hover helpers below expect a &[PassageTokenGroup]
+    // in source order, so we extract the values and sort by passage_offset.
+    let token_groups_map = inner.semantic_tokens.get(&uri).cloned().unwrap_or_default();
+    let mut token_groups: Vec<knot_formats::plugin::PassageTokenGroup> =
+        token_groups_map.into_values().collect();
+    token_groups.sort_by_key(|g| g.passage_offset);
 
     // 0. NOTE: We deliberately do NOT do diagnostic-first hover here.
     //    VS Code natively shows diagnostic messages when the cursor is over a

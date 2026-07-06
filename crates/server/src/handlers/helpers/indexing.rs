@@ -7,7 +7,9 @@ use lsp_types::*;
 use std::collections::HashMap;
 use url::Url;
 
-use super::diagnostics::{analyze_with_format_vars, publish_all_diagnostics};
+use super::diagnostics::{
+    analyze_with_format_vars, build_all_lsp_diagnostics, compute_sigils, send_lsp_diagnostics,
+};
 use super::graph::rebuild_graph;
 use super::parsing::{extract_and_set_metadata, parse_story_data_json, parse_with_format_plugin};
 
@@ -297,15 +299,17 @@ pub(crate) async fn index_workspace(
         );
 
         // Store format diagnostics
-        inner
-            .format_diagnostics
-            .insert(uri.clone(), parse_result.diagnostic_groups);
+        inner.format_diagnostics.insert(
+            uri.clone(),
+            crate::handlers::helpers::diagnostic_groups_to_map(parse_result.diagnostic_groups),
+        );
 
         // Cache semantic tokens at parse time so semantic_tokens_full
         // never needs to re-parse
-        inner
-            .semantic_tokens
-            .insert(uri.clone(), parse_result.token_groups);
+        inner.semantic_tokens.insert(
+            uri.clone(),
+            crate::handlers::helpers::token_groups_to_map(parse_result.token_groups),
+        );
 
         // Check for StoryData (may update metadata with start passage, ifid, etc.)
         extract_and_set_metadata(&mut inner.workspace, &doc, &text);
@@ -329,9 +333,7 @@ pub(crate) async fn index_workspace(
     let format;
     let doc_uris: Vec<String>;
     let diagnostics;
-    let open_docs;
-    let fmt_diags;
-    let config;
+    let prebuilt_diagnostics;
     {
         let mut inner_guard = inner.write().await;
         format = inner_guard.workspace.resolve_format();
@@ -360,33 +362,23 @@ pub(crate) async fn index_workspace(
             .map(|u| u.to_string())
             .collect();
 
+        // Task 3: consolidated — build LSP diagnostics under the read lock
+        // (sync), so the async send can be lock-free.
         diagnostics =
             analyze_with_format_vars(&inner_guard.workspace, &inner_guard.format_registry);
-        open_docs = inner_guard.open_documents.clone();
-        fmt_diags = inner_guard.format_diagnostics.clone();
-        config = inner_guard.workspace.config.clone();
+        let sigils = compute_sigils(&inner_guard.format_registry, &inner_guard.workspace);
+        prebuilt_diagnostics = build_all_lsp_diagnostics(
+            &diagnostics,
+            &inner_guard.format_diagnostics,
+            &inner_guard.open_documents,
+            &inner_guard.workspace,
+            &inner_guard.workspace.config,
+            &sigils,
+        );
     }
 
-    // Re-acquire read lock for publish — it needs workspace for variable related info
-    {
-        let inner_guard = inner.read().await;
-        let format = inner_guard.workspace.resolve_format();
-        let plugin = inner_guard.format_registry.get(&format);
-        let sigils: Vec<char> = plugin
-            .as_ref()
-            .map(|p| p.variable_sigils().iter().map(|s| s.sigil).collect())
-            .unwrap_or_default();
-        publish_all_diagnostics(
-            client,
-            &diagnostics,
-            &fmt_diags,
-            &open_docs,
-            &inner_guard.workspace,
-            &config,
-            &sigils,
-        )
-        .await;
-    }
+    // Send diagnostics to the client (lock-free).
+    send_lsp_diagnostics(client, prebuilt_diagnostics).await;
 
     // Always send formatDetected after initial indexing so the client
     // can set language IDs even when the format hasn't "changed" (it

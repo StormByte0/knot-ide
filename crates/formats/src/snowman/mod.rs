@@ -1090,7 +1090,8 @@ impl FormatPluginMut for SnowmanPlugin {
         passage_tags: &[String],
         passage_text: &str,
         _file_uri: &str,
-    ) -> Option<Passage> {
+        passage_offset: usize,
+    ) -> Option<crate::plugin::ParseResult> {
         let special_def = self.classify_passage(passage_name, passage_tags);
 
         let mut passage = if let Some(def) = special_def {
@@ -1100,6 +1101,7 @@ impl FormatPluginMut for SnowmanPlugin {
         };
 
         passage.tags = passage_tags.to_vec();
+        passage.passage_offset = passage_offset;
 
         let is_script = passage.is_script_passage();
         let is_stylesheet = passage.is_stylesheet_passage();
@@ -1113,7 +1115,12 @@ impl FormatPluginMut for SnowmanPlugin {
             passage.body = self.build_blocks(&segments);
         }
 
-        Some(passage)
+        Some(crate::plugin::ParseResult {
+            passages: vec![passage],
+            token_groups: Vec::new(),
+            diagnostic_groups: Vec::new(),
+            is_complete: true,
+        })
     }
 
     fn remove_file_from_registries(&mut self, _file_uri: &str) {}
@@ -1752,8 +1759,10 @@ mod tests {
     fn parse_passage_tagged_header() {
         let mut plugin = SnowmanPlugin::new();
         let result =
-            plugin.parse_passage_mut("TopBar", &["header".to_string()], "Header content\n", "");
-        let p = result.expect("tagged [header] passage should be classified as special");
+            plugin.parse_passage_mut("TopBar", &["header".to_string()], "Header content\n", "", 0);
+        let p = &result
+            .expect("tagged [header] passage should be classified as special")
+            .passages[0];
         assert!(
             p.is_special,
             "Passage tagged 'header' should be special via classify_passage"
@@ -1770,8 +1779,10 @@ mod tests {
     fn parse_passage_tagged_footer() {
         let mut plugin = SnowmanPlugin::new();
         let result =
-            plugin.parse_passage_mut("BottomBar", &["footer".to_string()], "Footer content\n", "");
-        let p = result.expect("tagged [footer] passage should be classified as special");
+            plugin.parse_passage_mut("BottomBar", &["footer".to_string()], "Footer content\n", "", 0);
+        let p = &result
+            .expect("tagged [footer] passage should be classified as special")
+            .passages[0];
         assert!(
             p.is_special,
             "Passage tagged 'footer' should be special via classify_passage"
@@ -1787,8 +1798,10 @@ mod tests {
     #[test]
     fn parse_passage_name_matched_passage_header() {
         let mut plugin = SnowmanPlugin::new();
-        let result = plugin.parse_passage_mut("PassageHeader", &[], "Header content\n", "");
-        let p = result.expect("PassageHeader (name-matched) should be classified as special");
+        let result = plugin.parse_passage_mut("PassageHeader", &[], "Header content\n", "", 0);
+        let p = &result
+            .expect("PassageHeader (name-matched) should be classified as special")
+            .passages[0];
         assert!(
             p.is_special,
             "PassageHeader should be special via name matching"

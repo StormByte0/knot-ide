@@ -25,7 +25,7 @@ use crate::sugarcube::ast::{AnalyzedVarOp, AstNode, JsAnalysis, PassageAst};
 use crate::sugarcube::js::js_preprocess;
 use crate::sugarcube::js::js_walk;
 use crate::sugarcube::registries::variable_tree::VarAccessKind;
-use knot_core::oxc::{ParseMode as JsParseMode, parse_js};
+use knot_core::oxc::{parse_and_visit, ParseMode as JsParseMode};
 use oxc_span::GetSpan;
 
 /// Annotate AST nodes with JS analysis results (Phase 2).
@@ -87,12 +87,18 @@ fn annotate_script_passage(passage_ast: &mut PassageAst, body_text: &str, sugarc
     // a blank JS block is a clearer signal that "something is broken" than
     // a sea of approximate tokens from a fallback scanner. The diagnostic
     // from js_validate still shows the error location.
-    let outcome = parse_js(&preprocessed.source, JsParseMode::Module);
-    if let Some(analysis) =
-        outcome.with_program(|program| js_walk::walk_script_passage(program, &preprocessed))
-    {
-        passage_ast.script_js_analysis = Some(analysis);
-    }
+    //
+    // Task 1 (optimization): we capture `outcome.diagnostics` and store
+    // them on `JsAnalysis.diagnostics` so `validate_script_passage` can
+    // consume them WITHOUT re-parsing the same source.
+    let (outcome, analysis) = parse_and_visit(
+        &preprocessed.source,
+        JsParseMode::Module,
+        |program| js_walk::walk_script_passage(program, &preprocessed),
+    );
+    let mut analysis = analysis.unwrap_or_default();
+    analysis.diagnostics = outcome.diagnostics;
+    passage_ast.script_js_analysis = Some(analysis);
 }
 
 /// Annotate inline JS snippets in normal passage AST nodes.
@@ -671,22 +677,18 @@ fn analyze_js_snippet(source: &str, body_offset: usize, is_block: bool) -> JsAna
         wrapping_offset,
     };
 
-    let outcome = parse_js(&shifted.source, js_mode);
-    // oxc has error recovery — walk whatever AST we can get, even if there
-    // are syntax errors. The valid parts get token highlighting; the broken
-    // parts get precise diagnostics via js_validate.
-    //
-    // If oxc panics (unrecoverable error), return empty analysis — no tokens.
-    // The diagnostic from js_validate still shows the error location.
-    outcome
-        .with_program(|program| {
-            if is_block {
-                js_walk::walk_script_passage(program, &shifted)
-            } else {
-                js_walk::walk_inline_js(program, &shifted)
-            }
-        })
-        .unwrap_or_default()
+    // Task 1 (optimization): capture `outcome.diagnostics` so
+    // `validate_inline_js` can consume them WITHOUT re-parsing.
+    let (outcome, analysis) = parse_and_visit(&shifted.source, js_mode, |program| {
+        if is_block {
+            js_walk::walk_script_passage(program, &shifted)
+        } else {
+            js_walk::walk_inline_js(program, &shifted)
+        }
+    });
+    let mut analysis = analysis.unwrap_or_default();
+    analysis.diagnostics = outcome.diagnostics;
+    analysis
 }
 
 /// Decompose a block literal (object or array) into leaf writes for a
@@ -716,10 +718,9 @@ fn decompose_block_literal_for_set(
         wrapping_offset: 1, // Expression mode
     };
 
-    let outcome = parse_js(&shifted.source, JsParseMode::Expression);
     let mut result = Vec::new();
 
-    outcome.with_program(|program| {
+    let (_outcome, _) = parse_and_visit(&shifted.source, JsParseMode::Expression, |program| {
         for stmt in &program.body {
             if let oxc_ast::ast::Statement::ExpressionStatement(expr_stmt) = stmt {
                 let expr = &expr_stmt.expression;

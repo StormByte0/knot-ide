@@ -327,3 +327,430 @@ fn empty_document(
     };
     (doc, result)
 }
+
+// ===========================================================================
+// Incremental single-passage parsing (M2)
+// ===========================================================================
+
+/// Convert a `Vec<PassageDiagnosticGroup>` (from a `ParseResult`) into the
+/// `HashMap<String, PassageDiagnosticGroup>` shape used by the server's
+/// `format_diagnostics` cache (M3).
+///
+/// Keyed by `passage_name`. If the input Vec contains two groups with the
+/// same name (shouldn't happen in practice — passage names are unique within
+/// a file), the later one wins.
+pub fn diagnostic_groups_to_map(
+    groups: Vec<fmt_plugin::PassageDiagnosticGroup>,
+) -> std::collections::HashMap<String, fmt_plugin::PassageDiagnosticGroup> {
+    groups
+        .into_iter()
+        .map(|g| (g.passage_name.clone(), g))
+        .collect()
+}
+
+/// Convert a `Vec<PassageTokenGroup>` (from a `ParseResult`) into the
+/// `HashMap<String, PassageTokenGroup>` shape used by the server's
+/// `semantic_tokens` cache (M3).
+///
+/// Keyed by `passage_name`. If the input Vec contains two groups with the
+/// same name (shouldn't happen in practice), the later one wins.
+pub fn token_groups_to_map(
+    groups: Vec<fmt_plugin::PassageTokenGroup>,
+) -> std::collections::HashMap<String, fmt_plugin::PassageTokenGroup> {
+    groups
+        .into_iter()
+        .map(|g| (g.passage_name.clone(), g))
+        .collect()
+}
+
+/// Merge a single-passage incremental `ParseResult` into an existing
+/// `format_diagnostics` cache entry, replacing the edited passage's group
+/// in place (M3 surgical update).
+///
+/// - `existing`: the current per-URI HashMap (will be mutated).
+/// - `single_result`: the incremental parse result (contains one passage's
+///   diagnostic group, or one for the panic-error fallback).
+///
+/// After this call, `existing` has the edited passage's group replaced;
+/// all other passages' groups are untouched.
+pub fn merge_incremental_diagnostics(
+    existing: &mut std::collections::HashMap<String, fmt_plugin::PassageDiagnosticGroup>,
+    single_result: &fmt_plugin::ParseResult,
+) {
+    for group in &single_result.diagnostic_groups {
+        existing.insert(group.passage_name.clone(), group.clone());
+    }
+}
+
+/// Merge a single-passage incremental `ParseResult` into an existing
+/// `semantic_tokens` cache entry (M3 surgical update).
+///
+/// - If the incremental parse succeeded, the edited passage's token group
+///   is replaced in place.
+/// - If the incremental parse panicked (M2's degraded mode), the edited
+///   passage's token group is REMOVED (panic = no tokens emitted for that
+///   passage). Other passages' token groups are untouched.
+pub fn merge_incremental_tokens(
+    existing: &mut std::collections::HashMap<String, fmt_plugin::PassageTokenGroup>,
+    single_result: &fmt_plugin::ParseResult,
+    is_panic_degraded: bool,
+    panicked_passage_name: Option<&str>,
+) {
+    if is_panic_degraded {
+        // Panic path: the single_result has no token groups (the plugin
+        // panicked before emitting any). Remove the panicked passage's
+        // old token group so we don't show stale tokens for broken JS.
+        if let Some(name) = panicked_passage_name {
+            existing.remove(name);
+        }
+        return;
+    }
+    for group in &single_result.token_groups {
+        existing.insert(group.passage_name.clone(), group.clone());
+    }
+}
+
+/// Error from [`parse_passage_incremental`].
+#[derive(Debug)]
+pub enum PassageParseError {
+    /// No format plugin was registered for the requested format (or the
+    /// default format). The caller should fall back to the empty-document
+    /// path used by `parse_with_format_plugin`.
+    NoPlugin,
+    /// `parse_passage_mut` returned `None` — the plugin's passage classifier
+    /// could not classify the passage (e.g. a `[widget]` passage lost its
+    /// tag). The caller should fall back to a full-file re-parse.
+    ClassificationFailed,
+    /// The format plugin panicked while parsing this passage. The panic is
+    /// contained: other passages in the document are unaffected. The caller
+    /// should call [`replace_passage_with_error`] to emit a scoped
+    /// diagnostic for this passage and leave the rest of the document
+    /// intact.
+    Panic(String),
+}
+
+/// Incrementally re-parse a single passage with the format plugin.
+///
+/// This is the per-passage analog of [`parse_with_format_plugin`]. It wraps
+/// `plugin.parse_passage_mut` in `catch_unwind` so that a panic in passage A
+/// does NOT propagate to passages B/C/D — the headline win of M2.
+///
+/// ## Arguments
+///
+/// - `registry`: the format plugin registry (mutably borrowed).
+/// - `uri`: the document URI (passed to the plugin for registry bookkeeping).
+/// - `format`: the story format to use for parsing.
+/// - `_version`: the LSP document version (unused by plugins, but kept for
+///   symmetry with `parse_with_format_plugin`).
+/// - `passage_name`, `passage_tags`, `passage_text`: the passage to re-parse.
+/// - `passage_offset`: the document-absolute byte offset of the passage's
+///   `::` header. The plugin sets `passage.passage_offset` from this.
+///
+/// ## Returns
+///
+/// - `Ok(ParseResult)` on success — a single-passage `ParseResult` containing
+///   the re-parsed passage, its diagnostic group, and its token group. Ready
+///   to splice into the document-level caches.
+/// - `Err(NoPlugin)` — no plugin registered; caller falls back to empty doc.
+/// - `Err(ClassificationFailed)` — plugin returned `None`; caller falls back
+///   to full-file re-parse.
+/// - `Err(Panic(msg))` — plugin panicked; caller calls
+///   [`replace_passage_with_error`] to scope the error to this passage.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_passage_incremental(
+    registry: &mut fmt_plugin::FormatRegistry,
+    uri: &Url,
+    format: StoryFormat,
+    _version: i32,
+    passage_name: &str,
+    passage_tags: &[String],
+    passage_text: &str,
+    passage_offset: usize,
+) -> Result<fmt_plugin::ParseResult, PassageParseError> {
+    // Two-step lookup to avoid the borrow checker: first try the requested
+    // format, then fall back to the default format. We can't use `or_else`
+    // with a closure that re-borrows `registry` because the first borrow
+    // is still live.
+    let plugin = match registry.get_mut(&format) {
+        Some(p) => Some(p),
+        None => registry.get_mut(&StoryFormat::default_format()),
+    };
+    let plugin = plugin.ok_or(PassageParseError::NoPlugin)?;
+
+    let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        plugin.parse_passage_mut(
+            passage_name,
+            passage_tags,
+            passage_text,
+            uri.as_str(),
+            passage_offset,
+        )
+    }));
+
+    match parse_result {
+        Ok(Some(parse_result)) => {
+            // Defensive: ensure passage_offset is set correctly on the
+            // returned passage, in case a plugin impl forgets to set it.
+            if let Some(passage) = parse_result.passages.first() {
+                debug_assert_eq!(
+                    passage.passage_offset, passage_offset,
+                    "plugin did not set passage_offset correctly"
+                );
+            }
+            Ok(parse_result)
+        }
+        Ok(None) => Err(PassageParseError::ClassificationFailed),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            tracing::error!(
+                "Format plugin {:?} panicked while parsing passage {} in {}: {}",
+                format,
+                passage_name,
+                uri,
+                msg
+            );
+            Err(PassageParseError::Panic(msg))
+        }
+    }
+}
+
+/// Replace a single passage's diagnostics with a scoped `sc-parse` error
+/// after a per-passage parse panic.
+///
+/// This is the per-passage analog of the `knot-panic` fallback in
+/// [`parse_with_format_plugin`]. The key difference: only the panicking
+/// passage is affected. All other passages' tokens, diagnostics, and graph
+/// edges are preserved.
+///
+/// ## What this does
+///
+/// 1. Locates the passage in `doc.passages` by name.
+/// 2. Returns a `PassageDiagnosticGroup` containing a single `sc-parse`
+///    Error diagnostic whose span covers the passage's full span
+///    (passage-relative `0..passage.span.end`) with the panic message.
+/// 3. Does NOT mutate `doc.passages` — the passage struct (links, vars,
+///    blocks, graph edges) is preserved from the previous parse. Only the
+///    diagnostic group is replaced.
+///
+/// ## Returns
+///
+/// `Some(PassageDiagnosticGroup)` if the passage was found, `None` if not
+/// (in which case the caller should fall back to full-file re-parse).
+pub fn replace_passage_with_error(
+    doc: &Document,
+    passage_name: &str,
+    panic_msg: &str,
+) -> Option<fmt_plugin::PassageDiagnosticGroup> {
+    let passage = doc.passages.iter().find(|p| p.name == passage_name)?;
+    let passage_span_end = passage.span.end.max(1);
+
+    Some(fmt_plugin::PassageDiagnosticGroup {
+        passage_name: passage_name.to_string(),
+        passage_offset: passage.passage_offset,
+        diagnostics: vec![fmt_plugin::FormatDiagnostic {
+            range: 0..passage_span_end,
+            message: format!("Internal error: passage parse panicked — {}", panic_msg),
+            severity: fmt_plugin::FormatDiagnosticSeverity::Error,
+            code: "sc-parse".to_string(),
+        }],
+    })
+}
+
+// ===========================================================================
+// Tests (M3)
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use knot_core::passage::StoryFormat;
+    use std::collections::HashMap;
+    use url::Url;
+
+    /// Build a `PassageDiagnosticGroup` for testing.
+    fn diag_group(name: &str, offset: usize, msg: &str) -> fmt_plugin::PassageDiagnosticGroup {
+        fmt_plugin::PassageDiagnosticGroup {
+            passage_name: name.to_string(),
+            passage_offset: offset,
+            diagnostics: vec![fmt_plugin::FormatDiagnostic {
+                range: 0..1,
+                message: msg.to_string(),
+                severity: fmt_plugin::FormatDiagnosticSeverity::Error,
+                code: "sc-parse".to_string(),
+            }],
+        }
+    }
+
+    /// Build a `PassageTokenGroup` for testing.
+    fn token_group(name: &str, offset: usize) -> fmt_plugin::PassageTokenGroup {
+        fmt_plugin::PassageTokenGroup {
+            passage_name: name.to_string(),
+            passage_offset: offset,
+            tokens: vec![fmt_plugin::SemanticToken {
+                start: 0,
+                length: 1,
+                token_type: fmt_plugin::SemanticTokenType::Variable,
+                modifier: None,
+            }],
+        }
+    }
+
+    /// Build a minimal `ParseResult` with the given diagnostic + token groups.
+    fn parse_result_with(
+        diags: Vec<fmt_plugin::PassageDiagnosticGroup>,
+        tokens: Vec<fmt_plugin::PassageTokenGroup>,
+    ) -> fmt_plugin::ParseResult {
+        fmt_plugin::ParseResult {
+            passages: Vec::new(),
+            token_groups: tokens,
+            diagnostic_groups: diags,
+            is_complete: true,
+        }
+    }
+
+    /// M3 acceptance test: `merge_incremental_diagnostics` replaces only the
+    /// edited passage's entry; other passages' entries are byte-for-byte
+    /// unchanged.
+    #[test]
+    fn merge_incremental_diagnostics_replaces_only_edited_passage() {
+        // Start with two passages' diagnostics cached.
+        let mut existing: HashMap<String, fmt_plugin::PassageDiagnosticGroup> = HashMap::new();
+        existing.insert("A".to_string(), diag_group("A", 0, "old A"));
+        existing.insert("B".to_string(), diag_group("B", 100, "old B"));
+
+        // Snapshot the original B entry — we'll assert it's unchanged.
+        let original_b = existing.get("B").cloned().unwrap();
+
+        // Simulate an incremental re-parse of passage A that produces a new
+        // diagnostic group for A only.
+        let single_result = parse_result_with(vec![diag_group("A", 0, "new A")], Vec::new());
+
+        merge_incremental_diagnostics(&mut existing, &single_result);
+
+        // A was replaced.
+        assert_eq!(existing.get("A").unwrap().diagnostics[0].message, "new A");
+        // B is byte-for-byte unchanged.
+        assert_eq!(existing.get("B").unwrap(), &original_b);
+        // Still exactly 2 entries.
+        assert_eq!(existing.len(), 2);
+    }
+
+    /// M3 acceptance test: `merge_incremental_tokens` on success replaces
+    /// only the edited passage's token group; other passages' groups are
+    /// untouched.
+    #[test]
+    fn merge_incremental_tokens_success_replaces_only_edited_passage() {
+        let mut existing: HashMap<String, fmt_plugin::PassageTokenGroup> = HashMap::new();
+        existing.insert("A".to_string(), token_group("A", 0));
+        let original_b = token_group("B", 100);
+        existing.insert("B".to_string(), original_b.clone());
+
+        // Incremental re-parse of A produces a new token group for A.
+        let new_a = fmt_plugin::PassageTokenGroup {
+            passage_name: "A".to_string(),
+            passage_offset: 0,
+            tokens: vec![fmt_plugin::SemanticToken {
+                start: 5,
+                length: 3,
+                token_type: fmt_plugin::SemanticTokenType::Function,
+                modifier: None,
+            }],
+        };
+        let single_result = parse_result_with(Vec::new(), vec![new_a]);
+
+        merge_incremental_tokens(&mut existing, &single_result, false, None);
+
+        // A was replaced with the new token.
+        assert_eq!(existing.get("A").unwrap().tokens[0].start, 5);
+        assert_eq!(existing.get("A").unwrap().tokens[0].length, 3);
+        // B is unchanged.
+        assert_eq!(existing.get("B").unwrap(), &original_b);
+        assert_eq!(existing.len(), 2);
+    }
+
+    /// M3 acceptance test: `merge_incremental_tokens` on panic-degraded mode
+    /// REMOVES the panicked passage's token group (no tokens for broken JS);
+    /// other passages' groups are untouched.
+    #[test]
+    fn merge_incremental_tokens_panic_removes_panicked_passage() {
+        let mut existing: HashMap<String, fmt_plugin::PassageTokenGroup> = HashMap::new();
+        existing.insert("A".to_string(), token_group("A", 0));
+        let original_b = token_group("B", 100);
+        existing.insert("B".to_string(), original_b.clone());
+
+        // Panic-degraded mode: the plugin panicked, no token groups emitted.
+        let single_result = parse_result_with(Vec::new(), Vec::new());
+
+        merge_incremental_tokens(&mut existing, &single_result, true, Some("A"));
+
+        // A was removed (no tokens for broken JS).
+        assert!(!existing.contains_key("A"));
+        // B is unchanged.
+        assert_eq!(existing.get("B").unwrap(), &original_b);
+        assert_eq!(existing.len(), 1);
+    }
+
+    /// M3 acceptance test: `diagnostic_groups_to_map` produces a HashMap
+    /// keyed by passage name from a Vec of groups.
+    #[test]
+    fn diagnostic_groups_to_map_keys_by_passage_name() {
+        let groups = vec![
+            diag_group("A", 0, "A error"),
+            diag_group("B", 100, "B error"),
+        ];
+        let map = diagnostic_groups_to_map(groups);
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("A"));
+        assert!(map.contains_key("B"));
+        assert_eq!(map.get("A").unwrap().passage_offset, 0);
+        assert_eq!(map.get("B").unwrap().passage_offset, 100);
+    }
+
+    /// M3 acceptance test: `token_groups_to_map` produces a HashMap keyed
+    /// by passage name from a Vec of groups.
+    #[test]
+    fn token_groups_to_map_keys_by_passage_name() {
+        let groups = vec![token_group("A", 0), token_group("B", 100)];
+        let map = token_groups_to_map(groups);
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("A"));
+        assert!(map.contains_key("B"));
+        assert_eq!(map.get("A").unwrap().passage_offset, 0);
+        assert_eq!(map.get("B").unwrap().passage_offset, 100);
+    }
+
+    /// M3 acceptance test: `replace_passage_with_error` produces a scoped
+    /// diagnostic group covering the passage's span.
+    #[test]
+    fn replace_passage_with_error_scopes_to_passage_span() {
+        use knot_core::passage::Passage;
+
+        let mut passage = Passage::new("A".to_string(), 0..50);
+        passage.passage_offset = 100;
+        let mut doc = Document::new(Url::parse("file:///test.tw").unwrap(), StoryFormat::Core);
+        doc.passages.push(passage);
+
+        let group = replace_passage_with_error(&doc, "A", "boom").unwrap();
+        assert_eq!(group.passage_name, "A");
+        assert_eq!(group.passage_offset, 100);
+        assert_eq!(group.diagnostics.len(), 1);
+        assert_eq!(group.diagnostics[0].severity, fmt_plugin::FormatDiagnosticSeverity::Error);
+        assert_eq!(group.diagnostics[0].code, "sc-parse");
+        assert!(group.diagnostics[0].message.contains("boom"));
+        // Span covers the passage (passage-relative 0..50).
+        assert_eq!(group.diagnostics[0].range, 0..50);
+    }
+
+    /// M3 acceptance test: `replace_passage_with_error` returns None when
+    /// the passage is not found.
+    #[test]
+    fn replace_passage_with_error_returns_none_for_missing_passage() {
+        let doc = Document::new(Url::parse("file:///test.tw").unwrap(), StoryFormat::Core);
+        let result = replace_passage_with_error(&doc, "missing", "boom");
+        assert!(result.is_none());
+    }
+}

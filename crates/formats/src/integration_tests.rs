@@ -1271,6 +1271,51 @@ fn sugarcube_js_validation_stylesheet_no_js_diagnostics() {
     );
 }
 
+/// Task 1 (optimization): `[script]` passage with invalid JS must still
+/// produce `sc-js` diagnostics. This proves the diagnostics propagate from
+/// `annotate_js`'s `parse_and_visit` → `JsAnalysis.diagnostics` →
+/// `validate_script_passage` (which now consumes them without re-parsing).
+///
+/// If the propagation broke, no `sc-js` diagnostics would appear.
+#[test]
+fn sugarcube_js_validation_invalid_script_passage_produces_diagnostic() {
+    let src = ":: MyScript [script]\nfunction ( {\n";
+    let (.., pr) = sc_parse(src);
+
+    let js_diags: Vec<_> = pr
+        .diagnostic_groups
+        .iter()
+        .flat_map(|g| g.diagnostics.iter())
+        .filter(|d| d.code == "sc-js")
+        .collect();
+    assert!(
+        !js_diags.is_empty(),
+        "Invalid JS in [script] passage should produce sc-js diagnostics (via propagated diagnostics, no re-parse). Got: {:?}",
+        js_diags
+    );
+}
+
+/// Task 1 (optimization): `[script]` passage with valid JS must produce
+/// NO `sc-js` diagnostics. This proves the propagated diagnostics are
+/// correct (not stale, not missing).
+#[test]
+fn sugarcube_js_validation_valid_script_passage_no_diagnostic() {
+    let src = ":: MyScript [script]\nvar x = 1;\nfunction foo() { return x; }\n";
+    let (.., pr) = sc_parse(src);
+
+    let js_diags: Vec<_> = pr
+        .diagnostic_groups
+        .iter()
+        .flat_map(|g| g.diagnostics.iter())
+        .filter(|d| d.code == "sc-js")
+        .collect();
+    assert!(
+        js_diags.is_empty(),
+        "Valid JS in [script] passage should produce no sc-js diagnostics. Got: {:?}",
+        js_diags
+    );
+}
+
 // ── Phase E: find_macro_at_position + scan_line_for_macro_events ──────────
 
 #[test]
@@ -2159,7 +2204,7 @@ fn sugarcube_incremental_reparse_updates_registries() {
 
     assert!(plugin.workspace_variable_names().contains("$gold"));
 
-    let result = plugin.parse_passage_mut("Start", &[], "<<set $silver to 20>>", "");
+    let result = plugin.parse_passage_mut("Start", &[], "<<set $silver to 20>>", "", 0);
     assert!(result.is_some());
 
     let names = plugin.workspace_variable_names();
@@ -2174,7 +2219,7 @@ fn sugarcube_incremental_reparse_keeps_other_passages() {
     let src = ":: Start\n<<set $gold to 10>>\n:: Forest\n<<set $hp to 100>>\n";
     let (mut plugin, _) = sc_parse(src);
 
-    let result = plugin.parse_passage_mut("Start", &[], "<<set $silver to 20>>", "");
+    let result = plugin.parse_passage_mut("Start", &[], "<<set $silver to 20>>", "", 0);
     assert!(result.is_some());
 
     let names = plugin.workspace_variable_names();

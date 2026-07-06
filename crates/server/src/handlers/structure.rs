@@ -471,7 +471,7 @@ mod signature_help_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), parse_result.token_groups);
+                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
                 m
             },
             installed_formats: Vec::new(),

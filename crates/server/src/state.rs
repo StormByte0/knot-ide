@@ -62,10 +62,17 @@ pub struct ServerStateInner {
     /// This includes both editor-open files and files read from disk during
     /// workspace indexing. Used for position lookups, hover text, diagnostics, etc.
     pub open_documents: HashMap<Url, String>,
-    /// Per-document format plugin diagnostics (URI → diagnostics).
+    /// Per-document format plugin diagnostics (URI → passage name → diagnostics).
+    ///
+    /// Keyed by passage name (not a Vec) so that incremental single-passage
+    /// re-parse (M2) can replace just one passage's diagnostic group without
+    /// touching the others — and so that a per-passage panic (M2's
+    /// `replace_passage_with_error` path) can scope the error without
+    /// invalidating other passages' cached diagnostics.
+    ///
     /// These are separate from graph diagnostics because they are produced
     /// by the format parser during parsing, not by graph analysis.
-    pub format_diagnostics: HashMap<Url, Vec<PassageDiagnosticGroup>>,
+    pub format_diagnostics: HashMap<Url, HashMap<String, PassageDiagnosticGroup>>,
     /// Per-document version tracking (URI → LSP version number).
     /// The LSP version is monotonically increasing and comes from the client.
     /// This is stored separately from `Document.version` because re-parsing
@@ -94,7 +101,7 @@ pub struct ServerStateInner {
     /// for the format-switch cascade (Phase 3), where didClose+didOpen pairs
     /// can temporarily remove documents from the cache. Stale tokens are
     /// better than no tokens because VS Code will re-request after a refresh.
-    pub semantic_tokens: HashMap<Url, Vec<PassageTokenGroup>>,
+    pub semantic_tokens: HashMap<Url, HashMap<String, PassageTokenGroup>>,
 
     /// Catalog of installed story formats, indexed from the resolved
     /// storyformats directory (see `build::resolve_storyformats_dir`).

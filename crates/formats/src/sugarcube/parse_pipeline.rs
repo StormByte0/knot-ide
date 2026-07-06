@@ -20,7 +20,7 @@
 //!    walks the enriched AST once and populates all registries from `JsAnalysis`
 //!    (with SugarCube semantic overrides applied).
 
-use knot_core::passage::{Passage, PassageCategory as CorePassageCategory};
+use knot_core::passage::PassageCategory as CorePassageCategory;
 use url::Url;
 
 use super::SugarCubePlugin;
@@ -200,11 +200,21 @@ pub(super) fn parse_full(plugin: &mut SugarCubePlugin, uri: &Url, text: &str) ->
                 // validate_inline_js only walks AST nodes for <<script>> block
                 // macros, which doesn't cover [script] passages (their entire
                 // body is JS, no macro wrapper).
+                //
+                // Task 1 (optimization): pass the pre-collected diagnostics
+                // from `annotate_js` (stored on `script_js_analysis`) so
+                // `validate_script_passage` doesn't re-parse the same source.
+                let script_diagnostics = passage_ast
+                    .script_js_analysis
+                    .as_ref()
+                    .map(|a| a.diagnostics.as_slice())
+                    .unwrap_or(&[]);
                 let js_diagnostics = super::js_validate::validate_script_passage(
                     &cp.body_text,
                     body_offset_in_passage,
                     // Twee [script] passages use SugarCube syntax
                     true,
+                    script_diagnostics,
                 );
                 passage_diagnostics.extend(js_diagnostics);
             } else {
@@ -346,13 +356,14 @@ fn count_total_var_ops(ast: &super::ast::PassageAst) -> usize {
 /// Incremental re-parse of a single passage.
 ///
 /// This is the body of `FormatPluginMut::parse_passage_mut()` for `SugarCubePlugin`.
-pub(super) fn parse_single(
+pub fn parse_single(
     plugin: &mut SugarCubePlugin,
     passage_name: &str,
     passage_tags: &[String],
     passage_text: &str,
     file_uri: &str,
-) -> Option<Passage> {
+    passage_offset: usize,
+) -> Option<crate::plugin::ParseResult> {
     // Determine the parse mode from the tags
     let mode = if passage_tags
         .iter()
@@ -438,10 +449,14 @@ pub(super) fn parse_single(
     };
 
     // Build the Passage struct (passage-relative spans, passage_head = 0).
-    // body_offset_in_passage = 0 because parse_single has no document context.
+    // body_offset_in_passage = 0 because parse_single builds passage-relative
+    // spans internally; the caller sets passage_offset for document-absolute
+    // wire conversion at the LSP boundary.
     let mut passage = passage_build::build_passage(&cp, &passage_ast, 0, 0);
     passage.span = 0..passage_text.len();
-    passage.passage_offset = 0;
+    // Set the document-absolute passage_offset from the caller's param.
+    // All other spans (links, vars, blocks) remain passage-relative (0 = `::`).
+    passage.passage_offset = passage_offset;
 
     // header_name_span: in parse_single, header_start=0, name_start=0,
     // so the span is already passage-relative.
@@ -452,6 +467,7 @@ pub(super) fn parse_single(
     passage.vars = passage_build::build_vars_from_unified_ast(&passage_ast, 0);
 
     // Phase 3: Registry mutation — clear old passage data, then populate.
+    let body_offset_in_passage: usize = 0;
     {
         let registry = plugin.registry_mut();
         registry.remove_passage(passage_name);
@@ -461,11 +477,120 @@ pub(super) fn parse_single(
             &passage_ast,
             &cp,
             file_uri,
-            0, // body_offset_in_passage = 0 (parse_single has no document context)
+            body_offset_in_passage,
         );
     }
 
-    Some(passage)
+    // ── Build semantic tokens (same per-passage logic as parse_full) ──
+    let mut passage_tokens = Vec::new();
+    let is_special = cp.special_def.is_some();
+
+    // Header tokens (already passage-relative from build_header_tokens)
+    let header_tokens = super::token_builder::build_header_tokens(&cp.header, is_special);
+    passage_tokens.extend(header_tokens);
+
+    // Body tokens (shift body-relative AST spans by body_offset_in_passage)
+    if matches!(mode, ParseMode::Minimal) {
+        let json_tokens =
+            super::token_builder::build_json_body_tokens(&cp.body_text, body_offset_in_passage);
+        passage_tokens.extend(json_tokens);
+    } else if matches!(mode, ParseMode::Stylesheet) {
+        // Stylesheet passages are pure CSS. CSS parsing is currently
+        // unserved (see `knot_core::css`) — no tokens emitted.
+    } else if matches!(mode, ParseMode::Interface) {
+        // StoryInterface body is HTML. HTML parsing is currently
+        // unserved — no tokens emitted.
+    } else {
+        // Collect custom macro names for Function token differentiation
+        let registry = plugin.registry();
+        let custom_names: std::collections::HashSet<String> =
+            registry.custom_macros().names().cloned().collect();
+        super::token_builder::build_semantic_tokens(
+            &passage_ast.nodes,
+            &mut passage_tokens,
+            body_offset_in_passage,
+            &custom_names,
+            &cp.body_text,
+        );
+        // For script passages, also emit tokens from script_js_analysis
+        if let Some(ref analysis) = passage_ast.script_js_analysis {
+            super::token_builder::build_script_passage_tokens(
+                analysis,
+                &mut passage_tokens,
+                body_offset_in_passage,
+            );
+        }
+    }
+
+    let token_group = crate::plugin::PassageTokenGroup {
+        passage_name: passage_name.to_string(),
+        passage_offset,
+        tokens: passage_tokens,
+    };
+
+    // ── Build diagnostics (same per-passage logic as parse_full) ──
+    let mut passage_diagnostics = Vec::new();
+    {
+        let registry = plugin.registry();
+        super::token_builder::build_diagnostics(
+            &passage_ast.nodes,
+            &mut passage_diagnostics,
+            body_offset_in_passage,
+            registry.custom_macros(),
+        );
+    }
+
+    // Validate inline JS snippets via oxc (for diagnostics only)
+    if !matches!(mode, ParseMode::Stylesheet | ParseMode::Minimal) {
+        if matches!(mode, ParseMode::Script) {
+            // Task 1 (optimization): pass pre-collected diagnostics from
+            // `annotate_js` to avoid re-parsing the same JS source.
+            let script_diagnostics = passage_ast
+                .script_js_analysis
+                .as_ref()
+                .map(|a| a.diagnostics.as_slice())
+                .unwrap_or(&[]);
+            let js_diagnostics = super::js_validate::validate_script_passage(
+                &cp.body_text,
+                body_offset_in_passage,
+                // Twee [script] passages use SugarCube syntax
+                true,
+                script_diagnostics,
+            );
+            passage_diagnostics.extend(js_diagnostics);
+        } else {
+            let known_macro_names = {
+                let registry = plugin.registry();
+                let mut names: std::collections::HashSet<String> = registry
+                    .custom_macro_names()
+                    .into_iter()
+                    .collect();
+                for m in super::macros::builtin_macros() {
+                    names.insert(m.name.to_string());
+                }
+                names
+            };
+            let js_diagnostics = super::js_validate::validate_inline_js(
+                &passage_ast.nodes,
+                body_offset_in_passage,
+                &known_macro_names,
+            );
+            passage_diagnostics.extend(js_diagnostics);
+        }
+    }
+
+    let diagnostic_group = crate::plugin::PassageDiagnosticGroup {
+        passage_name: passage_name.to_string(),
+        passage_offset,
+        diagnostics: passage_diagnostics,
+    };
+
+    Some(crate::plugin::ParseResult {
+        passages: vec![passage],
+        token_groups: vec![token_group],
+        diagnostic_groups: vec![diagnostic_group],
+        is_complete: true,
+    })
 }
 
 /// Parse a standalone `.js` file as a synthetic script passage.
@@ -603,8 +728,16 @@ pub(super) fn parse_script_file(
 
     // Build diagnostics — validate the entire file as a JS module.
     // sugarcube_syntax = true (identical to [script] passages).
+    //
+    // Task 1 (optimization): pass pre-collected diagnostics from
+    // `annotate_js` to avoid re-parsing the same JS source.
     let mut passage_diagnostics = Vec::new();
-    let js_diagnostics = super::js_validate::validate_script_passage(text, 0, true);
+    let script_diagnostics = passage_ast
+        .script_js_analysis
+        .as_ref()
+        .map(|a| a.diagnostics.as_slice())
+        .unwrap_or(&[]);
+    let js_diagnostics = super::js_validate::validate_script_passage(text, 0, true, script_diagnostics);
     passage_diagnostics.extend(js_diagnostics);
 
     let diagnostic_group = PassageDiagnosticGroup {

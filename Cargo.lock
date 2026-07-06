@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "knot-core"
-version = "2.0.0"
+version = "2.0.1-preview"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "knot-formats"
-version = "2.0.0"
+version = "2.0.1-preview"
 dependencies = [
  "knot-core",
  "logos",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "knot-server"
-version = "2.0.0"
+version = "2.0.1-preview"
 dependencies = [
  "knot-core",
  "knot-formats",

@@ -28,12 +28,21 @@ struct SemTok {
 /// `passage_offset` to convert to document-absolute byte offsets, then
 /// convert to LSP line/character positions.
 ///
+/// Convert cached passage-relative semantic tokens to document-absolute
+/// `SemTok` values ready for LSP encoding.
+///
+/// M3: the cache is now `HashMap<String, PassageTokenGroup>` keyed by
+/// passage name. We sort by `passage_offset` before iterating so the
+/// output is deterministic (HashMap iteration order is not). The sort
+/// also matches the previous Vec-based behavior where groups were in
+/// source order.
+///
 /// The `length` field from the format plugin is in byte lengths. We convert:
 /// - `passage_offset + start` → LSP Position via `byte_offset_to_position`
 /// - `length` → UTF-16 code unit count (LSP requires UTF-16, not byte length)
 fn convert_semantic_tokens(
     text: &str,
-    token_groups: &[fmt_plugin::PassageTokenGroup],
+    token_groups: &std::collections::HashMap<String, fmt_plugin::PassageTokenGroup>,
 ) -> Vec<SemTok> {
     let mut tokens = Vec::new();
     let text_len = text.len();
@@ -52,7 +61,11 @@ fn convert_semantic_tokens(
         }
     }
 
-    for group in token_groups {
+    // Sort groups by passage_offset for deterministic output (M3).
+    let mut sorted_groups: Vec<&fmt_plugin::PassageTokenGroup> = token_groups.values().collect();
+    sorted_groups.sort_by_key(|g| g.passage_offset);
+
+    for group in sorted_groups {
         for pt in &group.tokens {
             // Resolve passage-relative offset to document-absolute
             let doc_absolute_start = group.passage_offset + pt.start;
@@ -742,7 +755,7 @@ mod document_symbol_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), parse_result.token_groups);
+                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
                 m
             },
             installed_formats: Vec::new(),

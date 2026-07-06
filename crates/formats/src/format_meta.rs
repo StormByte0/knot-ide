@@ -43,8 +43,7 @@
 //! `Macro.add()` extraction, etc.), so we reuse `knot_core::oxc::parse_js()`
 //! — no new dependencies.
 
-use knot_core::oxc::ParseMode;
-use knot_core::oxc::parse_js;
+use knot_core::oxc::{parse_and_visit, ParseMode};
 use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey, Statement};
 use serde::{Deserialize, Serialize};
 
@@ -140,11 +139,10 @@ pub struct InstalledFormat {
 /// assert_eq!(meta.version, "2.37.0");
 /// ```
 pub fn parse_format_js(content: &str) -> Result<FormatMeta, String> {
-    let outcome = parse_js(content, ParseMode::Module);
+    let (outcome, found) = parse_and_visit(content, ParseMode::Module, |program| {
+        let mut meta = FormatMeta::default();
+        let mut found = false;
 
-    let mut meta = FormatMeta::default();
-
-    let found = outcome.with_program(|program| {
         for stmt in &program.body {
             // format.js headers look like: ({ "name": "...", ... })
             // oxc parses this as ExpressionStatement → ParenthesizedExpression → ObjectExpression
@@ -211,19 +209,31 @@ pub fn parse_format_js(content: &str) -> Result<FormatMeta, String> {
             }
 
             if meta.is_useful() {
-                return true;
+                found = true;
+                break;
             }
         }
-        false
+
+        if found {
+            Some(meta)
+        } else {
+            None
+        }
     });
 
-    if found.unwrap_or(false) {
-        Ok(meta)
-    } else {
-        Err(
+    // `outcome` is unused but available if we want to surface oxc diagnostics
+    // for malformed format.js files in the future.
+    let _ = outcome;
+
+    // `found` is `Option<Option<FormatMeta>>` — outer Option is "did the
+    // visitor run at all" (None if oxc panicked), inner Option is "did we
+    // find a useful header object". Flatten both.
+    match found {
+        Some(Some(meta)) => Ok(meta),
+        _ => Err(
             "No format.js header found — file does not contain a top-level object literal with name and version fields"
                 .to_string(),
-        )
+        ),
     }
 }
 

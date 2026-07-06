@@ -7,6 +7,7 @@
 mod code_actions;
 mod compiler;
 mod diagnostics;
+mod edit_mapping;
 mod formatting;
 mod graph;
 mod indexing;
@@ -18,6 +19,7 @@ mod uri;
 pub(crate) use code_actions::*;
 pub(crate) use compiler::{detect_compiler_version, resolve_storyformats_dir, which_compiler};
 pub(crate) use diagnostics::*;
+pub(crate) use edit_mapping::*;
 pub(crate) use formatting::*;
 pub(crate) use graph::*;
 pub(crate) use indexing::*;
