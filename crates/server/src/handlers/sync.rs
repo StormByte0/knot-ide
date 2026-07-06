@@ -352,7 +352,7 @@ pub fn did_change_phase1(
     // path (single-passage `ParseResult`) or the full re-parse path (all
     // passages). M3 uses this to decide between merging the result into the
     // existing cache (incremental) vs replacing the whole cache (full).
-    let (doc, parse_result, was_incremental, is_panic_degraded, panicked_passage_name, dispatch) = match &impact {
+    let (mut doc, parse_result, was_incremental, is_panic_degraded, panicked_passage_name, dispatch) = match &impact {
         helpers::EditImpact::WithinPassage {
             passage_name,
             in_passage_range: _,
@@ -429,6 +429,82 @@ pub fn did_change_phase1(
             (doc, parse_result, false, false, None, dispatch)
         }
     };
+
+    // ── Fix up passage_offset for passages after the edited one ──────────
+    // When the edit changes the byte count (delta != 0), all passages AFTER
+    // the edited passage need their `passage_offset` shifted by delta. Without
+    // this, their cached diagnostics and tokens get mapped to wrong document
+    // positions because the `passage_offset` on their cached
+    // `PassageDiagnosticGroup` / `PassageTokenGroup` entries is stale.
+    //
+    // The edited passage's own offset doesn't change (the edit is within it,
+    // nothing before it changed). But passages after it shift by the net byte
+    // delta of the edit.
+    //
+    // This fix-up applies to:
+    // 1. `doc.passages[i].passage_offset` — used by workspace lookups
+    //    (find_passage, related-info builders, etc.).
+    // 2. `inner.format_diagnostics[uri][name].passage_offset` — used by
+    //    `build_all_lsp_diagnostics` to map format diagnostics to
+    //    document-absolute ranges.
+    // 3. `inner.semantic_tokens[uri][name].passage_offset` — used by
+    //    `convert_semantic_tokens` to map tokens to document-absolute
+    //    positions.
+    if was_incremental {
+        let delta = text.len() as isize - text_before.len() as isize;
+        if delta != 0 {
+            // Find the edited passage's old offset from doc_before.
+            let edited_name = match &dispatch {
+                DidChangeDispatch::Incremental { passage_name }
+                | DidChangeDispatch::IncrementalPanic { passage_name } => {
+                    passage_name.as_str()
+                }
+                _ => "",
+            };
+            let edited_offset = doc_before
+                .as_ref()
+                .and_then(|d| d.passages.iter().find(|p| p.name == edited_name))
+                .map(|p| p.passage_offset);
+
+            if let Some(edited_offset) = edited_offset {
+                // 1. Fix up passage_offset on doc.passages
+                for p in doc.passages.iter_mut() {
+                    if p.passage_offset > edited_offset {
+                        p.passage_offset =
+                            ((p.passage_offset as isize) + delta) as usize;
+                    }
+                }
+
+                // 2. Fix up format_diagnostics cache entries
+                if let Some(diag_map) = inner.format_diagnostics.get_mut(&uri) {
+                    for group in diag_map.values_mut() {
+                        if group.passage_offset > edited_offset {
+                            group.passage_offset =
+                                ((group.passage_offset as isize) + delta) as usize;
+                        }
+                    }
+                }
+
+                // 3. Fix up semantic_tokens cache entries
+                if let Some(token_map) = inner.semantic_tokens.get_mut(&uri) {
+                    for group in token_map.values_mut() {
+                        if group.passage_offset > edited_offset {
+                            group.passage_offset =
+                                ((group.passage_offset as isize) + delta) as usize;
+                        }
+                    }
+                }
+
+                tracing::trace!(
+                    file = %uri,
+                    edited_passage = %edited_name,
+                    edited_offset,
+                    delta,
+                    "did_change: fixed up passage_offset for passages after edited passage"
+                );
+            }
+        }
+    }
 
     // Update format diagnostics cache (M3 surgical invalidation).
     if was_incremental {
@@ -1657,6 +1733,8 @@ mod tests {
             .expect("Second has a token group before the edit");
 
         // Edit passage "Start" — replace "1 + 1" (line 1, chars 7..12) with "2".
+        // This shrinks the document by 4 bytes (5 chars → 1 char), so passage
+        // "Second"'s passage_offset should shift by -4.
         let changes = vec![change(1, 7, 1, 12, "2")];
         let result = did_change_phase1(&mut inner, uri.clone(), 2, changes);
 
@@ -1668,7 +1746,10 @@ mod tests {
             }
         );
 
-        // Passage "Second"'s cache entries are byte-for-byte unchanged.
+        // Passage "Second"'s cache entries: the diagnostics/tokens themselves
+        // (message, code, severity, passage-relative range) are unchanged, but
+        // the `passage_offset` is shifted by the byte delta (-4) because the
+        // edit shrank the text before passage "Second".
         let second_diags_after = inner
             .format_diagnostics
             .get(&uri)
@@ -1682,13 +1763,29 @@ mod tests {
             .cloned()
             .expect("Second has a token group after the edit");
 
+        // The diagnostics list itself is unchanged (same messages, codes, etc.)
         assert_eq!(
-            second_diags_before, second_diags_after,
-            "Second's diagnostic group must be unchanged after an incremental edit to Start"
+            second_diags_before.diagnostics, second_diags_after.diagnostics,
+            "Second's diagnostics (messages, codes, ranges) must be unchanged"
         );
         assert_eq!(
-            second_tokens_before, second_tokens_after,
-            "Second's token group must be unchanged after an incremental edit to Start"
+            second_tokens_before.tokens, second_tokens_after.tokens,
+            "Second's tokens (types, spans, modifiers) must be unchanged"
+        );
+
+        // The passage_offset is correctly shifted by the byte delta.
+        // "1 + 1" (5 chars) → "2" (1 char) = delta of -4.
+        let expected_delta: isize = second_diags_after.passage_offset as isize
+            - second_diags_before.passage_offset as isize;
+        assert_eq!(
+            expected_delta, -4,
+            "Second's passage_offset should shift by -4 (5 chars replaced with 1). Before: {}, After: {}",
+            second_diags_before.passage_offset, second_diags_after.passage_offset
+        );
+        assert_eq!(
+            second_tokens_after.passage_offset,
+            second_diags_after.passage_offset,
+            "Token and diagnostic groups should have the same passage_offset"
         );
     }
 }
