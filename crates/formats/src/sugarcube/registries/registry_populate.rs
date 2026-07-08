@@ -23,13 +23,15 @@
 //! 3. `walk_script_js()` — Kept temporarily for backward compat during migration.
 
 use super::SugarCubeRegistry;
-use super::variable_tree::VarAccessKind;
+use super::variable_tree::{VarAccessKind, VarOrigin};
 use crate::sugarcube::ast::{self, AnalyzedVarOp, SetOperator};
 use crate::sugarcube::classifier::ClassifiedPassage;
 use crate::sugarcube::js::js_annotate::compute_target_segment_spans;
+use crate::sugarcube::macros::find_macro;
 use crate::sugarcube::parser::predicates::is_assignment_macro;
 use crate::sugarcube::registries::function_registry::FunctionKind;
 use crate::sugarcube::registries::template_registry::TemplateKind;
+use knot_core::zoning::ZoneMap;
 
 /// Map a `SetOperator` from the AST to the appropriate `VarAccessKind`.
 fn set_operator_to_access_kind(op: &SetOperator) -> VarAccessKind {
@@ -87,22 +89,37 @@ pub fn populate_registries_from_unified_ast(
     {
         let vtree = registry.variables_mut();
 
-        let mut all_var_ops = Vec::new();
+        // Triple: (op, kind_override, origin) — origin is the zone context
+        // (Phase 9). Computed in `collect_var_ops_from_nodes` via `ZoneMap`
+        // lookups; defaults to `RawScript` for top-level script passages.
+        let mut all_var_ops: Vec<(AnalyzedVarOp, Option<VarAccessKind>, VarOrigin)> = Vec::new();
 
-        // For script passages, collect from script_js_analysis first
+        // For script passages, collect from script_js_analysis first.
+        // These are top-level JS var ops (not inside any macro) — their
+        // origin is `RawScript` since they come from oxc analysis of the
+        // passage's raw JS body.
         if let Some(ref analysis) = passage_ast.script_js_analysis {
             for op in &analysis.var_ops {
-                all_var_ops.push((op.clone(), None));
+                all_var_ops.push((op.clone(), None, VarOrigin::RawScript));
             }
         }
 
-        // Walk the AST nodes for inline var ops
-        collect_var_ops_from_nodes(&passage_ast.nodes, &mut all_var_ops, cp, file_uri);
+        // Walk the AST nodes for inline var ops. Thread the zone map so
+        // `collect_var_ops_from_nodes` can query the enclosing macro body
+        // for Text-node var refs (Phase 9 origin classification).
+        collect_var_ops_from_nodes(
+            &passage_ast.nodes,
+            &mut all_var_ops,
+            cp,
+            file_uri,
+            &passage_ast.zones,
+            body_offset_in_passage,
+        );
 
         // Record each variable operation
-        for (op, kind_override) in &all_var_ops {
+        for (op, kind_override, origin) in &all_var_ops {
             let final_kind = kind_override.unwrap_or(op.access_kind);
-            vtree.record_var(
+            vtree.record_var_with_origin(
                 &op.name,
                 op.is_temporary,
                 final_kind,
@@ -114,6 +131,7 @@ pub fn populate_registries_from_unified_ast(
                 &op.segment_spans,
                 op.construct_span.clone(),
                 &op.segment_construct_spans,
+                origin.clone(),
             );
         }
 
@@ -124,7 +142,7 @@ pub fn populate_registries_from_unified_ast(
                 knot_core::passage::SpecialPassageBehavior::Startup
             )
         }) {
-            for (op, _) in &all_var_ops {
+            for (op, _, _) in &all_var_ops {
                 if op.access_kind.is_write() {
                     vtree.mark_seeded(&op.name);
                 }
@@ -196,18 +214,35 @@ pub fn populate_registries_from_unified_ast(
 
 /// Collect all variable operations from AST nodes, applying SugarCube
 /// semantic overrides.
+///
+/// **Phase 9**: also computes a [`VarOrigin`] for each op by querying the
+/// `ZoneMap` at the variable's span. The origin records the zone context
+/// (prose / macro arg / macro body / expression / raw script) in which the
+/// variable access occurs. The zone map's spans are passage-relative, so
+/// `body_offset_in_passage` is added to the AST's body-relative offsets
+/// before querying.
 fn collect_var_ops_from_nodes(
     nodes: &[ast::AstNode],
-    result: &mut Vec<(AnalyzedVarOp, Option<VarAccessKind>)>,
+    result: &mut Vec<(AnalyzedVarOp, Option<VarAccessKind>, VarOrigin)>,
     _cp: &ClassifiedPassage,
     _file_uri: &str,
+    zones: &ZoneMap,
+    body_offset_in_passage: usize,
 ) {
     for node in nodes {
         match node {
             ast::AstNode::Text { var_refs, .. } => {
+                // Text node — var refs here are in prose/markup. The origin
+                // depends on whether we're inside a macro body (use the zone
+                // map to find out) or at the top level (Prose).
                 for vr in var_refs {
                     let segment_spans =
                         compute_target_segment_spans(&vr.name, &vr.property_path, &vr.span);
+                    let origin = compute_text_origin(
+                        zones,
+                        vr.span.start,
+                        body_offset_in_passage,
+                    );
 
                     result.push((
                         AnalyzedVarOp {
@@ -221,6 +256,7 @@ fn collect_var_ops_from_nodes(
                             segment_construct_spans: Vec::new(),
                         },
                         None,
+                        origin,
                     ));
                 }
             }
@@ -235,6 +271,21 @@ fn collect_var_ops_from_nodes(
                 full_span,
                 ..
             } => {
+                // Determine if this is a raw-body macro (e.g. <<script>>).
+                // Raw-body macros have their body processed by an external
+                // parser (oxc for JS); vars from their js_analysis get the
+                // RawScript origin. Non-raw macros (e.g. <<set>>) also have
+                // js_analysis for their args, but those args are SugarCube
+                // expressions → MacroArg.
+                let is_raw_body = is_raw_body_macro(name);
+                let macro_arg_origin = if is_raw_body {
+                    VarOrigin::RawScript
+                } else {
+                    VarOrigin::MacroArg {
+                        macro_name: name.clone(),
+                    }
+                };
+
                 let has_js_analysis = js_analysis.as_ref().is_some_and(|a| !a.var_ops.is_empty());
 
                 if has_js_analysis {
@@ -247,7 +298,7 @@ fn collect_var_ops_from_nodes(
                                 set_assignment.as_ref(),
                                 capture_target.as_ref(),
                             );
-                            result.push((op.clone(), kind_override));
+                            result.push((op.clone(), kind_override, macro_arg_origin.clone()));
                         }
                     }
                 } else {
@@ -289,6 +340,7 @@ fn collect_var_ops_from_nodes(
                                 segment_construct_spans: Vec::new(),
                             },
                             None,
+                            macro_arg_origin.clone(),
                         ));
                     }
                 }
@@ -353,6 +405,7 @@ fn collect_var_ops_from_nodes(
                                 },
                             },
                             None,
+                            macro_arg_origin.clone(),
                         ));
                     }
                 }
@@ -385,6 +438,7 @@ fn collect_var_ops_from_nodes(
                                 segment_construct_spans: Vec::new(),
                             },
                             None,
+                            macro_arg_origin.clone(),
                         ));
                     }
                 }
@@ -420,6 +474,7 @@ fn collect_var_ops_from_nodes(
                                 segment_construct_spans: Vec::new(),
                             },
                             None,
+                            macro_arg_origin.clone(),
                         ));
                     }
 
@@ -450,13 +505,23 @@ fn collect_var_ops_from_nodes(
                                 segment_construct_spans: Vec::new(),
                             },
                             None,
+                            macro_arg_origin.clone(),
                         ));
                     }
                 }
 
-                // Recurse into children
+                // Recurse into children (the macro's body). The zone map is
+                // threaded through so that Text nodes inside the body can
+                // query their enclosing macro context.
                 if let Some(ch) = children {
-                    collect_var_ops_from_nodes(ch, result, _cp, _file_uri);
+                    collect_var_ops_from_nodes(
+                        ch,
+                        result,
+                        _cp,
+                        _file_uri,
+                        zones,
+                        body_offset_in_passage,
+                    );
                 }
             }
             ast::AstNode::Expression {
@@ -464,11 +529,15 @@ fn collect_var_ops_from_nodes(
                 var_refs,
                 ..
             } => {
+                // Expression macros (<<=>>expr>>, <<->>expr>>) — their args
+                // are JS expressions. All var refs here get the Expression
+                // origin (Phase 9).
+                let expression_origin = VarOrigin::Expression;
                 let has_js_analysis = js_analysis.as_ref().is_some_and(|a| !a.var_ops.is_empty());
                 if has_js_analysis {
                     if let Some(analysis) = js_analysis {
                         for op in &analysis.var_ops {
-                            result.push((op.clone(), None));
+                            result.push((op.clone(), None, expression_origin.clone()));
                         }
                     }
                 } else {
@@ -488,6 +557,7 @@ fn collect_var_ops_from_nodes(
                                 segment_construct_spans: Vec::new(),
                             },
                             None,
+                            expression_origin.clone(),
                         ));
                     }
                 }
@@ -496,6 +566,50 @@ fn collect_var_ops_from_nodes(
         }
     }
 }
+
+/// Compute the [`VarOrigin`] for a variable reference in a Text node (Phase 9).
+///
+/// Text-node var refs are in prose/markup. Their origin depends on whether
+/// they're inside a macro body (→ `MacroBody { enclosing_macro, depth }`)
+/// or at the top level (→ `Prose`).
+///
+/// The zone map is queried at the var's span (shifted from body-relative to
+/// passage-relative via `body_offset_in_passage`). If the zone map is empty
+/// (e.g., script passages don't have zones populated), falls back to `Prose`.
+fn compute_text_origin(
+    zones: &ZoneMap,
+    body_offset: usize,
+    body_offset_in_passage: usize,
+) -> VarOrigin {
+    let passage_offset = body_offset.saturating_add(body_offset_in_passage);
+    if let Some(leaf) = zones.leaf_at(passage_offset) {
+        // The leaf's body_idx tells us if we're inside a macro body.
+        // body_stack_at walks the parent chain to get the full ancestor
+        // stack; the last element is the innermost (immediate) enclosing body.
+        let stack = zones.body_stack_at(passage_offset);
+        if let Some(innermost) = stack.last() {
+            return VarOrigin::MacroBody {
+                enclosing_macro: innermost.macro_name.clone(),
+                depth: innermost.depth,
+            };
+        }
+        // Leaf exists but no enclosing body → top-level prose/markup.
+        // (leaf.body_idx is None, meaning we're at the passage top level.)
+        let _ = leaf; // suppress unused warning
+    }
+    // Zone map empty or no enclosing body → top-level prose.
+    VarOrigin::Prose
+}
+
+/// Check if a macro name corresponds to a raw-body macro (Phase 9).
+///
+/// Raw-body macros (currently only `<<script>>`) have their body processed by
+/// an external parser (oxc for JS) rather than the SugarCube parser. Var ops
+/// from their `js_analysis` get the `RawScript` origin.
+fn is_raw_body_macro(name: &str) -> bool {
+    find_macro(name).is_some_and(|d| d.body_is_raw)
+}
+
 
 /// Determine SugarCube semantic overrides for a variable operation within
 /// a macro context.
@@ -764,10 +878,12 @@ pub fn walk_script_js(
         |program| {
             let analysis = js_walk::walk_script_passage(program, &preprocessed);
 
-            // Record variable operations
+            // Record variable operations. `walk_script_js` handles script
+            // passages — all var ops here originate from raw JS, so their
+            // `VarOrigin` is `RawScript` (Phase 9).
             let vtree = registry.variables_mut();
             for op in &analysis.var_ops {
-                vtree.record_var(
+                vtree.record_var_with_origin(
                     &op.name,
                     op.is_temporary,
                     op.access_kind,
@@ -779,6 +895,7 @@ pub fn walk_script_js(
                     &op.segment_spans,
                     op.construct_span.clone(),
                     &op.segment_construct_spans,
+                    VarOrigin::RawScript,
                 );
             }
 
@@ -1091,6 +1208,257 @@ mod tests {
             );
         } else {
             panic!("Expected a Macro node as the first AST node");
+        }
+    }
+
+    // ===================================================================
+    // Phase 9 — VarOrigin tests
+    // ===================================================================
+    //
+    // These tests verify that `VarAccess.origin` is correctly populated
+    // based on the zone context (prose / macro arg / macro body /
+    // expression / raw script). They parse a body, build zones (simulating
+    // what `parse_pipeline::parse_full` does), run `js_annotate::annotate_js`
+    // for JS analysis, then call `populate_registries_from_unified_ast` and
+    // inspect the resulting `VarAccess` records.
+
+    use crate::sugarcube::classifier::{PassageCategory};
+    use crate::sugarcube::registries::CustomMacroRegistry;
+    use crate::header::TweeHeader;
+    use crate::zoning::build_from_ast as build_zones;
+
+    /// Build a minimal `ClassifiedPassage` for testing.
+    fn make_cp(body: &str) -> ClassifiedPassage {
+        ClassifiedPassage {
+            header: TweeHeader {
+                name: "Test".to_string(),
+                tags: Vec::new(),
+                header_start: 0,
+                name_start: 3,
+                metadata_json: None,
+                name_text_raw: "Test".to_string(),
+                tags_raw: String::new(),
+            },
+            body_text: body.to_string(),
+            file_uri: "file:///test.tw".to_string(),
+            category: PassageCategory::Regular,
+            special_def: None,
+            processing_priority: 40,
+        }
+    }
+
+    /// Parse a body, annotate JS, build zones, and populate registries.
+    /// Returns the `SugarCubeRegistry` for inspection.
+    fn parse_and_populate(body: &str) -> SugarCubeRegistry {
+        let mut ast = parser::parse_passage_body(body, 0, ParseMode::Normal);
+
+        // Phase 2: JS annotation (sugarcube_syntax = true for Twee passages)
+        js_annotate::annotate_js(
+            &mut ast,
+            body,
+            false,
+            true,
+            &std::collections::HashSet::new(),
+        );
+
+        // Phase 1b: Build zones (simulating what parse_pipeline does).
+        ast.zones = build_zones(&ast.nodes, 0, &CustomMacroRegistry::new());
+
+        let cp = make_cp(body);
+        let mut registry = SugarCubeRegistry::new();
+        populate_registries_from_unified_ast(&mut registry, &ast, &cp, "file:///test.tw", 0);
+        registry
+    }
+
+    /// Collect all `VarAccess` records for a given variable name from the
+    /// registry's variable tree. Uses `get_variable` to find the root node,
+    /// then collects all accesses from its `meta.refs` (includes both direct
+    /// and propagated accesses).
+    fn collect_accesses(registry: &SugarCubeRegistry, var_name: &str) -> Vec<super::super::variable_tree::VarAccess> {
+        let vtree = registry.variables();
+        let mut accesses = Vec::new();
+        if let Some((_, node)) = vtree.get_variable(var_name) {
+            accesses.extend(node.meta.refs.iter().cloned());
+        }
+        accesses
+    }
+
+    /// `$gold` in top-level prose → `VarOrigin::Prose`.
+    #[test]
+    fn phase9_origin_prose() {
+        let body = "You have $gold gold pieces.";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record"
+        );
+        for a in &accesses {
+            assert!(
+                matches!(a.origin, super::super::variable_tree::VarOrigin::Prose),
+                "$gold in prose should have origin Prose, got {:?}",
+                a.origin
+            );
+        }
+    }
+
+    /// `$gold` in `<<print $gold>>` args → `VarOrigin::MacroArg { "print" }`.
+    #[test]
+    fn phase9_origin_macro_arg() {
+        let body = "<<print $gold>>";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record"
+        );
+        for a in &accesses {
+            match &a.origin {
+                super::super::variable_tree::VarOrigin::MacroArg { macro_name } => {
+                    assert_eq!(
+                        macro_name, "print",
+                        "$gold in <<print $gold>> should have MacroArg {{ \"print\" }}, got MacroArg with {:?}",
+                        macro_name
+                    );
+                }
+                other => panic!(
+                    "$gold in <<print $gold>> should have MacroArg origin, got {:?}",
+                    other
+                ),
+            }
+        }
+    }
+
+    /// `$gold` in `<<link>>` body → `VarOrigin::MacroBody { "link", depth: 1 }`.
+    #[test]
+    fn phase9_origin_macro_body() {
+        let body = "<<link \"Go\">>You find $gold.<</link>>";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record (from inside <<link>> body)"
+        );
+        for a in &accesses {
+            match &a.origin {
+                super::super::variable_tree::VarOrigin::MacroBody { enclosing_macro, depth } => {
+                    assert_eq!(
+                        enclosing_macro, "link",
+                        "$gold in <<link>> body should have enclosing_macro \"link\", got {:?}",
+                        enclosing_macro
+                    );
+                    assert_eq!(
+                        *depth, 0,
+                        "$gold in <<link>> body should have depth 0 (outermost body = depth 0), got {}",
+                        depth
+                    );
+                }
+                other => panic!(
+                    "$gold in <<link>> body should have MacroBody origin, got {:?}",
+                    other
+                ),
+            }
+        }
+    }
+
+    /// `$gold` in nested macro body (`<<link>><<if>>$gold<</if>><</link>>`)
+    /// → `VarOrigin::MacroBody { "if", depth: 2 }`.
+    #[test]
+    fn phase9_origin_nested_macro_body() {
+        let body = "<<link \"Go\">><<if $x>>You find $gold.<</if>><</link>>";
+        let registry = parse_and_populate(body);
+        let gold_accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !gold_accesses.is_empty(),
+            "$gold should have at least one access record"
+        );
+        for a in &gold_accesses {
+            match &a.origin {
+                super::super::variable_tree::VarOrigin::MacroBody { enclosing_macro, depth } => {
+                    assert_eq!(
+                        enclosing_macro, "if",
+                        "$gold inside <<link>><<if>> should have enclosing_macro \"if\" (innermost), got {:?}",
+                        enclosing_macro
+                    );
+                    assert_eq!(
+                        *depth, 1,
+                        "$gold inside <<link>><<if>> should have depth 1 (link=0, if=1), got {}",
+                        depth
+                    );
+                }
+                other => panic!(
+                    "$gold inside <<link>><<if>> should have MacroBody origin, got {:?}",
+                    other
+                ),
+            }
+        }
+    }
+
+    /// `$gold` in `<<set $gold to 1>>` → `VarOrigin::MacroArg { "set" }`.
+    #[test]
+    fn phase9_origin_set_macro_arg() {
+        let body = "<<set $gold to 1>>";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record"
+        );
+        for a in &accesses {
+            match &a.origin {
+                super::super::variable_tree::VarOrigin::MacroArg { macro_name } => {
+                    assert_eq!(
+                        macro_name, "set",
+                        "$gold in <<set $gold to 1>> should have MacroArg {{ \"set\" }}, got {:?}",
+                        macro_name
+                    );
+                }
+                other => panic!(
+                    "$gold in <<set $gold to 1>> should have MacroArg origin, got {:?}",
+                    other
+                ),
+            }
+        }
+    }
+
+    /// `$gold` in `<<script>>` body → `VarOrigin::RawScript`.
+    #[test]
+    fn phase9_origin_raw_script() {
+        let body = "<<script>>\nState.variables.gold = 100;\n<</script>>";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record from <<script>> body"
+        );
+        for a in &accesses {
+            assert!(
+                matches!(a.origin, super::super::variable_tree::VarOrigin::RawScript),
+                "$gold in <<script>> body should have origin RawScript, got {:?}",
+                a.origin
+            );
+        }
+    }
+
+    /// `$gold` in `<<= $gold>>` expression → `VarOrigin::Expression`.
+    #[test]
+    fn phase9_origin_expression() {
+        // Note: `<<= $gold>>` (with space after `=`) is the correct SugarCube
+        // expression-macro syntax. `<<=>>$gold>>` (no space) would parse as
+        // an empty `<<=>>` expression followed by text `$gold>>`.
+        let body = "<<= $gold>>";
+        let registry = parse_and_populate(body);
+        let accesses = collect_accesses(&registry, "$gold");
+        assert!(
+            !accesses.is_empty(),
+            "$gold should have at least one access record from <<=>> expression"
+        );
+        for a in &accesses {
+            assert!(
+                matches!(a.origin, super::super::variable_tree::VarOrigin::Expression),
+                "$gold in <<= $gold>> should have origin Expression, got {:?}",
+                a.origin
+            );
         }
     }
 }

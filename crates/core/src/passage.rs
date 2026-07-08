@@ -849,6 +849,20 @@ pub struct Passage {
     /// re-parse), this is 0 because the passage text is isolated.
     #[serde(default)]
     pub passage_offset: usize,
+
+    /// The unified zone map for this passage body.
+    ///
+    /// Classifies every byte of the body into one of five leaf kinds
+    /// (Prose, Markup, MacroTag, Raw, Error) and carries macro-body
+    /// context records for nested-macro queries. All spans are
+    /// **passage-relative** (0 = passage head `::`).
+    ///
+    /// Populated by the format plugin during parsing. `ZoneMap::default()`
+    /// (empty) for passages that don't get SugarCube parsing
+    /// (Script/Stylesheet/Minimal modes) or for passages from formats that
+    /// haven't adopted the zoning engine yet.
+    #[serde(default)]
+    pub zones: crate::zoning::ZoneMap,
 }
 
 impl Passage {
@@ -871,6 +885,7 @@ impl Passage {
             special_def: None,
             position: None,
             passage_offset: 0,
+            zones: crate::zoning::ZoneMap::default(),
         }
     }
 
@@ -893,6 +908,7 @@ impl Passage {
             special_def: Some(def),
             position: None,
             passage_offset: 0,
+            zones: crate::zoning::ZoneMap::default(),
         }
     }
 

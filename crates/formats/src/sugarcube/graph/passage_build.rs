@@ -216,6 +216,11 @@ pub fn build_passage(
     // positions at the LSP boundary.
     passage.passage_offset = passage_head;
 
+    // Copy the unified zone map from the AST. All spans are already
+    // passage-relative (the builder in `parse_pipeline` shifted them by
+    // `body_offset_in_passage` at build time).
+    passage.zones = passage_ast.zones.clone();
+
     passage
 }
 

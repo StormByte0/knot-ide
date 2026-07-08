@@ -26,7 +26,7 @@ use crate::plugin::{
     SemanticTokenType,
 };
 use crate::sugarcube::ast;
-use crate::sugarcube::macros::{deprecated_macros, folding_modifier_names};
+use crate::sugarcube::macros::{deprecated_macros, find_macro, folding_modifier_names, macro_parent_constraints};
 use crate::sugarcube::special_passages;
 
 /// Build semantic tokens from AST nodes.
@@ -1486,7 +1486,38 @@ pub fn build_diagnostics(
     body_offset_in_passage: usize,
     custom_macros: &crate::sugarcube::registries::CustomMacroRegistry,
 ) {
+    // Phase 8: container-violation and unknown-macro diagnostics.
+    //
+    // We use an inner recursive helper that tracks the enclosing macro stack.
+    // The public signature stays the same — the stack starts empty at the
+    // top level.
     let dep_macros = deprecated_macros();
+    let parent_constraints = macro_parent_constraints();
+    build_diagnostics_inner(
+        nodes,
+        diagnostics,
+        body_offset_in_passage,
+        custom_macros,
+        &dep_macros,
+        &parent_constraints,
+        &mut Vec::new(), // enclosing macro stack (outermost-first)
+    );
+}
+
+/// Inner recursive helper for `build_diagnostics`.
+///
+/// `enclosing_stack` tracks the names of enclosing block macros
+/// (outermost-first). It's pushed when entering a macro with a body and
+/// popped when leaving.
+fn build_diagnostics_inner(
+    nodes: &[ast::AstNode],
+    diagnostics: &mut Vec<FormatDiagnostic>,
+    body_offset_in_passage: usize,
+    custom_macros: &crate::sugarcube::registries::CustomMacroRegistry,
+    dep_macros: &std::collections::HashMap<&'static str, &'static str>,
+    parent_constraints: &std::collections::HashMap<&'static str, std::collections::HashSet<&'static str>>,
+    enclosing_stack: &mut Vec<String>,
+) {
     for node in nodes {
         if let ast::AstNode::Error { message, span } = node {
             diagnostics.push(FormatDiagnostic {
@@ -1504,6 +1535,53 @@ pub fn build_diagnostics(
             ..
         } = node
         {
+            // ── Unknown-macro diagnostic (Phase 8) ──────────────────────
+            //
+            // If the macro is neither in the builtin catalog nor in the
+            // custom macro registry, emit a hint. Custom widgets are
+            // registered early (via [widget] and [script] passages), so
+            // an unknown macro at this point is genuinely undefined.
+            let is_known = find_macro(name).is_some()
+                || custom_macros.contains(name);
+            if !is_known {
+                diagnostics.push(FormatDiagnostic {
+                    range: body_offset_in_passage + name_span.start
+                        ..body_offset_in_passage + name_span.end,
+                    message: format!("Unknown macro: <<{}>>", name),
+                    severity: FormatDiagnosticSeverity::Hint,
+                    code: "sc-unknown-macro".to_string(),
+                });
+            }
+
+            // ── Container-violation diagnostic (Phase 8) ───────────────
+            //
+            // If this macro has parent constraints (it's a SubMacro like
+            // <<else>>, <<case>>, <<break>>), check that at least one
+            // enclosing macro is in the allowed-parents set. If not, emit
+            // a warning.
+            if let Some(valid_parents) = parent_constraints.get(name.as_str()) {
+                let inside_valid_parent = enclosing_stack
+                    .iter()
+                    .any(|enc| valid_parents.contains(enc.as_str()));
+                if !inside_valid_parent {
+                    let allowed_str: Vec<String> = valid_parents
+                        .iter()
+                        .map(|p| format!("<<{}>>", p))
+                        .collect();
+                    diagnostics.push(FormatDiagnostic {
+                        range: body_offset_in_passage + name_span.start
+                            ..body_offset_in_passage + name_span.end,
+                        message: format!(
+                            "<<{}>> is only valid inside {}",
+                            name,
+                            allowed_str.join(" or ")
+                        ),
+                        severity: FormatDiagnosticSeverity::Warning,
+                        code: "sc-container-violation".to_string(),
+                    });
+                }
+            }
+
             // Unclosed block macro diagnostic.
             //
             // Only emit for macros with BodyRequirement::Required that have
@@ -1540,7 +1618,18 @@ pub fn build_diagnostics(
                 });
             }
             if let Some(ch) = children {
-                build_diagnostics(ch, diagnostics, body_offset_in_passage, custom_macros);
+                // Push this macro onto the enclosing stack before recursing.
+                enclosing_stack.push(name.clone());
+                build_diagnostics_inner(
+                    ch,
+                    diagnostics,
+                    body_offset_in_passage,
+                    custom_macros,
+                    dep_macros,
+                    parent_constraints,
+                    enclosing_stack,
+                );
+                enclosing_stack.pop();
             }
         }
     }
@@ -2063,6 +2152,188 @@ mod tests {
                 ("Link", "Target".to_string()),
                 ("String", "Café—naïve".to_string()),
             ]
+        );
+    }
+}
+
+/// Phase 8 tests: container-violation and unknown-macro diagnostics.
+#[cfg(test)]
+mod phase8_diagnostics_tests {
+    use super::*;
+    use crate::sugarcube::ast::ParseMode;
+    use crate::sugarcube::parser::parse_passage_body;
+    use crate::sugarcube::registries::CustomMacroRegistry;
+
+    /// Helper: parse a body string and build diagnostics.
+    fn diagnostics_for(body: &str) -> Vec<FormatDiagnostic> {
+        let ast = parse_passage_body(body, 0, ParseMode::Normal);
+        let mut diags = Vec::new();
+        build_diagnostics(&ast.nodes, &mut diags, 0, &CustomMacroRegistry::new());
+        diags
+    }
+
+    /// Helper: find a diagnostic by code.
+    fn find_by_code<'a>(diags: &'a [FormatDiagnostic], code: &str) -> Option<&'a FormatDiagnostic> {
+        diags.iter().find(|d| d.code == code)
+    }
+
+    /// `<<else>>` at top level → container-violation warning.
+    #[test]
+    fn else_at_top_level_emits_container_violation() {
+        let diags = diagnostics_for("<<else>>");
+        let v = find_by_code(&diags, "sc-container-violation");
+        assert!(
+            v.is_some(),
+            "<<else>> at top level should emit sc-container-violation: got {:?}",
+            diags
+        );
+        let v = v.unwrap();
+        assert!(
+            v.message.contains("else"),
+            "message should mention 'else': {}",
+            v.message
+        );
+        assert!(
+            v.message.contains("<<if>>"),
+            "message should mention '<<if>>' as valid parent: {}",
+            v.message
+        );
+    }
+
+    /// `<<else>>` inside `<<if>>` → NO container-violation.
+    #[test]
+    fn else_inside_if_no_violation() {
+        let diags = diagnostics_for("<<if $x>>text<<else>>more<</if>>");
+        assert!(
+            find_by_code(&diags, "sc-container-violation").is_none(),
+            "<<else>> inside <<if>> should NOT emit container-violation: got {:?}",
+            diags
+        );
+    }
+
+    /// `<<case>>` at top level → container-violation.
+    #[test]
+    fn case_at_top_level_emits_container_violation() {
+        let diags = diagnostics_for("<<case 1>>");
+        let v = find_by_code(&diags, "sc-container-violation");
+        assert!(
+            v.is_some(),
+            "<<case>> at top level should emit sc-container-violation: got {:?}",
+            diags
+        );
+        assert!(
+            v.unwrap().message.contains("<<switch>>"),
+            "message should mention '<<switch>>': {}",
+            v.unwrap().message
+        );
+    }
+
+    /// `<<case>>` inside `<<switch>>` → NO container-violation.
+    #[test]
+    fn case_inside_switch_no_violation() {
+        let diags = diagnostics_for("<<switch $x>><<case 1>>a<</case>><</switch>>");
+        assert!(
+            find_by_code(&diags, "sc-container-violation").is_none(),
+            "<<case>> inside <<switch>> should NOT emit container-violation: got {:?}",
+            diags
+        );
+    }
+
+    /// `<<break>>` inside `<<for>>` → NO violation.
+    #[test]
+    fn break_inside_for_no_violation() {
+        let diags = diagnostics_for("<<for _i to 0; _i lt 5; _i++>><<break>><</for>>");
+        assert!(
+            find_by_code(&diags, "sc-container-violation").is_none(),
+            "<<break>> inside <<for>> should NOT emit container-violation: got {:?}",
+            diags
+        );
+    }
+
+    /// `<<break>>` inside `<<if>>` (not `<<for>>`) → container-violation.
+    #[test]
+    fn break_inside_if_emits_violation() {
+        let diags = diagnostics_for("<<if $x>><<break>><</if>>");
+        let v = find_by_code(&diags, "sc-container-violation");
+        assert!(
+            v.is_some(),
+            "<<break>> inside <<if>> should emit sc-container-violation: got {:?}",
+            diags
+        );
+    }
+
+    /// `<<else>>` after `<</if>>` (post-close-sibling, §6.5 class) → container-violation.
+    #[test]
+    fn else_after_closed_if_emits_violation() {
+        let diags = diagnostics_for("<<if $x>>text<</if>><<else>>");
+        assert!(
+            find_by_code(&diags, "sc-container-violation").is_some(),
+            "<<else>> after <</if>> should emit container-violation: got {:?}",
+            diags
+        );
+    }
+
+    /// `<<else>>` inside `<<if>>` nested inside `<<link>>` → NO violation.
+    #[test]
+    fn else_in_nested_if_inside_link_no_violation() {
+        let diags =
+            diagnostics_for("<<link \"Go\">><<if $x>>text<<else>>more<</if>><</link>>");
+        assert!(
+            find_by_code(&diags, "sc-container-violation").is_none(),
+            "<<else>> inside <<if>> inside <<link>> should NOT emit violation: got {:?}",
+            diags
+        );
+    }
+
+    /// Unknown macro → sc-unknown-macro hint.
+    #[test]
+    fn unknown_macro_emits_hint() {
+        let diags = diagnostics_for("<<nonExistentMacro>>");
+        let v = find_by_code(&diags, "sc-unknown-macro");
+        assert!(
+            v.is_some(),
+            "unknown macro should emit sc-unknown-macro: got {:?}",
+            diags
+        );
+        let v = v.unwrap();
+        assert_eq!(v.severity, FormatDiagnosticSeverity::Hint);
+        assert!(
+            v.message.contains("nonExistentMacro"),
+            "message should mention the macro name: {}",
+            v.message
+        );
+    }
+
+    /// Known builtin macro → NO unknown-macro hint.
+    #[test]
+    fn known_builtin_macro_no_unknown_hint() {
+        let diags = diagnostics_for("<<set $x to 1>>");
+        assert!(
+            find_by_code(&diags, "sc-unknown-macro").is_none(),
+            "known builtin <<set>> should NOT emit sc-unknown-macro: got {:?}",
+            diags
+        );
+    }
+
+    /// Existing diagnostics (unclosed block) still fire — no regression.
+    #[test]
+    fn unclosed_block_still_fires() {
+        let diags = diagnostics_for("<<if $x>>text");
+        assert!(
+            find_by_code(&diags, "sc-unclosed").is_some(),
+            "unclosed <<if>> should still emit sc-unclosed: got {:?}",
+            diags
+        );
+    }
+
+    /// Existing diagnostics (parse error) still fire — no regression.
+    #[test]
+    fn parse_error_still_fires() {
+        let diags = diagnostics_for("text<</if>>");
+        assert!(
+            find_by_code(&diags, "sc-parse").is_some(),
+            "orphan close tag should still emit sc-parse: got {:?}",
+            diags
         );
     }
 }

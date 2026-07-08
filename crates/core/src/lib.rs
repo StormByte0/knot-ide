@@ -11,7 +11,9 @@ pub mod editing;
 pub mod graph;
 pub mod oxc;
 pub mod passage;
+pub mod types;
 pub mod workspace;
+pub mod zoning;
 
 pub use analysis::AnalysisEngine;
 pub use analysis::FormatVariableDiagnostic;
@@ -21,8 +23,10 @@ pub use graph::EdgeType;
 pub use graph::GameLoopInfo;
 pub use graph::PassageGraph;
 pub use passage::{Block, Link, Passage, PassageCategory, SpecialPassageBehavior, VarKind, VarOp};
+pub use types::{BodyRequirement, MacroKind};
 pub use workspace::DocumentUpdateResult;
 pub use workspace::Workspace;
+pub use zoning::{ErrorKind, LeafKind, LeafZone, MacroBody, MarkupKind, RawLanguage, TagPart, ZoneMap};
 
 #[cfg(test)]
 mod analysis_tests;

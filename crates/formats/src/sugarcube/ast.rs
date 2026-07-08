@@ -1210,6 +1210,14 @@ pub struct PassageAst {
     /// Populated during Phase 2 (JS annotation pass) for script passages.
     /// `None` for all other passage modes.
     pub script_js_analysis: Option<JsAnalysis>,
+    /// The unified zone map for this passage body.
+    ///
+    /// Built once from `nodes` after `tree_builder::build_tree` (Phase 1 of
+    /// the zoning engine). All spans are **passage-relative** (0 = passage
+    /// head `::`). Populated by `parse_pipeline` after `parse_passage_body`
+    /// returns. `ZoneMap::default()` (empty) for passages that don't get
+    /// SugarCube parsing (Script/Stylesheet/Minimal modes).
+    pub zones: crate::zoning::ZoneMap,
 }
 
 /// A link extracted from the AST, in a format-agnostic representation.
@@ -1256,6 +1264,7 @@ impl PassageAst {
             var_ops: Vec::new(),
             mode,
             script_js_analysis: None,
+            zones: crate::zoning::ZoneMap::default(),
         }
     }
 

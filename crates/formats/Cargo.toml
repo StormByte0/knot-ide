@@ -17,3 +17,4 @@ oxc_span = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+insta = { workspace = true }

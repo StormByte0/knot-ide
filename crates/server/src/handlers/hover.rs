@@ -232,7 +232,7 @@ pub(crate) async fn hover(
     //     `macro_invocations` (which tracks open tags only), so we detect
     //     via line-scanning for the `<</` pattern.
     if let Some(plugin) = plugin
-        && let Some(hover) = try_close_tag_hover(text, byte_offset, plugin)
+        && let Some(hover) = try_close_tag_hover(text, byte_offset, current_passage, plugin)
     {
         return Ok(Some(hover));
     }
@@ -249,7 +249,7 @@ pub(crate) async fn hover(
     //     (Heading, ListMarker, Blockquote, etc.) but had no hover handler,
     //     so hovering over them did nothing. This is a line-based scan that
     //     fires when the cursor is on the marker run at column 0.
-    if let Some(hover) = try_block_markup_hover(text, byte_offset) {
+    if let Some(hover) = try_block_markup_hover(text, byte_offset, current_passage) {
         return Ok(Some(hover));
     }
 
@@ -635,8 +635,51 @@ fn try_macro_arg_ref_hover_no_plugin(
 fn try_close_tag_hover(
     text: &str,
     byte_offset: usize,
+    passage: Option<&knot_core::Passage>,
     plugin: &dyn fmt_plugin::FormatPlugin,
 ) -> Option<Hover> {
+    // ── Phase 6: zone-map based detection ──────────────────────────
+    //
+    // Try the zone map first. If the cursor is on a `MacroTag { part: Close }`
+    // leaf, fire close-tag hover immediately. This is O(log n) and more
+    // accurate than the backward byte-scan.
+    //
+    // Falls back to the line-based backward scan if the zone map doesn't
+    // find a close tag (e.g., the user is mid-typing `<</` and the parser
+    // hasn't recognized it yet).
+    if let Some(passage) = passage {
+        let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
+        if let Some(leaf) = passage.zones.leaf_at(passage_offset) {
+            if let knot_core::zoning::LeafKind::MacroTag {
+                macro_name,
+                part: knot_core::zoning::TagPart::Close,
+                ..
+            } = &leaf.kind
+            {
+                // Only show hover if this is a known builtin macro.
+                if plugin.find_macro(macro_name).is_some() {
+                    let close_label = plugin.format_close_macro_label(macro_name);
+                    let hover_text = format!(
+                        "**`{}`** `Close tag`\n\nCloses the `{}` block.",
+                        close_label,
+                        plugin.format_macro_label(macro_name)
+                    );
+                    // Convert the leaf's passage-relative span to an LSP range.
+                    let abs_span = passage.abs_range(&leaf.span);
+                    let range = helpers::byte_range_to_lsp_range(text, &abs_span);
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: hover_text,
+                        }),
+                        range: Some(range),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Fallback: line-based backward scan for mid-typing cases ─────
     let line_info = helpers::byte_offset_to_position(text, byte_offset);
     let line_idx = line_info.line as usize;
     let line = text.lines().nth(line_idx)?;
@@ -858,10 +901,16 @@ fn try_macro_hover(
 /// Check if a macro invocation violates its container constraints.
 ///
 /// A macro with `mdef.container = Some("if")` must appear inside an `<<if>>`
-/// block. This function walks `passage.macro_invocations` to find the
-/// enclosing parent macro at `byte_offset` and verifies it matches the
-/// constraint. Returns `Some(message)` if there's a violation, `None` if
-/// the macro is correctly nested (or has no container constraint).
+/// block. This function uses the unified zone map
+/// (`passage.zones.enclosing_body_at`) to find the innermost enclosing macro
+/// body at `byte_offset` and verifies it matches the constraint. Returns
+/// `Some(message)` if there's a violation, `None` if the macro is correctly
+/// nested (or has no container constraint).
+///
+/// **Phase 3 migration**: replaced the hand-rolled innermost-enclosing-macro
+/// loop (which approximated "inside body" with "after open tag end" and got
+/// the post-close-sibling case wrong — see plan.md §6.5) with a single
+/// `enclosing_body_at` query on the zone map.
 fn check_container_violation(
     mdef: &knot_formats::types::MacroDef,
     passage: &Passage,
@@ -877,26 +926,18 @@ fn check_container_violation(
         return None; // No container constraint.
     };
 
-    // Find the enclosing parent macro by walking macro_invocations.
-    // A macro "encloses" the cursor if the cursor is inside its open tag
-    // span AND the macro has a body (container). We pick the innermost
-    // such macro.
-    let mut enclosing_parent: Option<&str> = None;
-    let mut enclosing_span_len = usize::MAX;
-    for inv in &passage.macro_invocations {
-        if !inv.has_body {
-            continue; // Inline macros can't enclose anything.
-        }
-        let abs_open = passage.abs_range(&inv.open_span);
-        // Cursor must be after the open tag and before the close tag.
-        // We approximate "inside the body" by checking the cursor is after
-        // the open tag's end. The close tag isn't stored separately, so
-        // we accept any macro whose open tag starts before the cursor.
-        if byte_offset > abs_open.end && abs_open.end - abs_open.start < enclosing_span_len {
-            enclosing_span_len = abs_open.end - abs_open.start;
-            enclosing_parent = Some(&inv.name);
-        }
-    }
+    // Convert document-absolute byte_offset to passage-relative for the
+    // zone map query. Zone map spans are passage-relative (0 = passage head).
+    let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
+
+    // Find the innermost enclosing macro body via the zone map.
+    // For a MacroTag leaf (e.g., `<<else>>`), `enclosing_body_at` returns
+    // the body the tag lives IN (its parent body) — which is exactly what
+    // we want for container violation checking.
+    let enclosing_parent: Option<&str> = passage
+        .zones
+        .enclosing_body_at(passage_offset)
+        .map(|body| body.macro_name.as_str());
 
     match enclosing_parent {
         Some(parent) => {
@@ -1681,7 +1722,164 @@ fn try_operator_hover(
 ///    re-parse).
 /// 3. It's consistent with `try_operator_hover` and `try_global_hover`,
 ///    which also use line-based scanning for simple patterns.
-fn try_block_markup_hover(text: &str, byte_offset: usize) -> Option<Hover> {
+/// Build hover text for a markup kind from the zone map.
+///
+/// `marker_text` is the source text of the markup leaf (used to determine
+/// the heading level, list depth, etc.). Returns `None` if the markup kind
+/// doesn't have a dedicated hover (e.g., `Comment`, `Link` — those have
+/// their own hover handlers).
+fn build_markup_hover_text(
+    kind: &knot_core::zoning::MarkupKind,
+    marker_text: &str,
+) -> Option<String> {
+    use knot_core::zoning::MarkupKind;
+    match kind {
+        MarkupKind::Heading => {
+            let level = marker_text.chars().take_while(|c| *c == '!').count().min(6).max(1);
+            let html_tag = match level {
+                1 => "h1",
+                2 => "h2",
+                3 => "h3",
+                4 => "h4",
+                5 => "h5",
+                _ => "h6",
+            };
+            let heading_desc = match level {
+                1 => "level 1 heading — main section title (largest)",
+                2 => "level 2 heading — subsection title",
+                3 => "level 3 heading — sub-subsection title",
+                4 => "level 4 heading — minor section title",
+                5 => "level 5 heading — small heading",
+                _ => "level 6 heading — smallest heading",
+            };
+            Some(format!(
+                "**`{}` Heading** (`{}` tag)\n\n{}",
+                "!".repeat(level),
+                html_tag,
+                heading_desc
+            ))
+        }
+        MarkupKind::ListItem => {
+            // Could be `*` (unordered) or `#` (ordered). Check the first char.
+            let first = marker_text.chars().next().unwrap_or('*');
+            let depth = marker_text.chars().take_while(|c| *c == first).count();
+            let depth_desc = if depth == 1 {
+                "top level".to_string()
+            } else {
+                format!("nested (depth {})", depth)
+            };
+            if first == '#' {
+                Some(format!(
+                    "**`{}` Ordered List Item**\n\nCreates a `<li>` in a `<ol>`. {}",
+                    "#".repeat(depth),
+                    depth_desc
+                ))
+            } else {
+                Some(format!(
+                    "**`{}` Unordered List Item**\n\nCreates a `<li>` in a `<ul>`. {}",
+                    "*".repeat(depth),
+                    depth_desc
+                ))
+            }
+        }
+        MarkupKind::Blockquote => {
+            // Could be `>` (line) or `<<<` (block). Check the first char.
+            let first = marker_text.chars().next().unwrap_or('>');
+            if first == '<' {
+                Some("**`<<<` Block Blockquote**\n\nOpens a block-style blockquote. Close with another `<<<` on its own line. Content between the delimiters is wrapped in `<blockquote>`.".to_string())
+            } else {
+                let depth = marker_text.chars().take_while(|c| *c == '>').count();
+                let depth_desc = if depth == 1 {
+                    "single level".to_string()
+                } else {
+                    format!("nested (depth {})", depth)
+                };
+                Some(format!(
+                    "**`{}` Blockquote**\n\nCreates a `<blockquote>`. {}",
+                    ">".repeat(depth),
+                    depth_desc
+                ))
+            }
+        }
+        MarkupKind::HorizontalRule => {
+            Some("**`----` Horizontal Rule**\n\nCreates an `<hr>` element. Requires 4+ dashes alone on a line at column 0.".to_string())
+        }
+        MarkupKind::CodeBlock => {
+            Some("**`{{{` Code Block**\n\nOpens a raw code block. Content is NOT processed (macros/variables inside are literal). Close with `}}}` alone on its own line. Renders as `<pre><code>…</code></pre>`.".to_string())
+        }
+        MarkupKind::InlineCode => {
+            Some("**`{{{` Inline Code**\n\nOpens inline raw code. Content is NOT processed (macros/variables inside are literal). Close with the first `}}}`. Renders as `<code>…</code>`.".to_string())
+        }
+        MarkupKind::Verbatim => {
+            Some("**`\"\"\"` Verbatim**\n\nRaw text — no markup processing. Macros, variables, and links inside are NOT executed. Close with the first `\"\"\"`.".to_string())
+        }
+        MarkupKind::Table => {
+            Some("**Table**\n\nTiddlyWiki-style table. Rows are `|`-delimited lines. Cells beginning with `!` are header cells.".to_string())
+        }
+        MarkupKind::InlineStyle => {
+            Some("**`@@` Inline Style**\n\n`@@class;text@@` produces `<span class=\"class\">text</span>`.".to_string())
+        }
+        MarkupKind::TextFormat => {
+            // Determine which format from the marker text.
+            if marker_text.starts_with("''") {
+                Some("**`''bold''` Bold**\n\nProduces `<strong>`.".to_string())
+            } else if marker_text.starts_with("//") {
+                Some("**`//italic//` Italic**\n\nProduces `<em>`.".to_string())
+            } else if marker_text.starts_with("__") {
+                Some("**`__underline__` Underline**\n\nProduces `<u>`.".to_string())
+            } else if marker_text.starts_with("==") {
+                Some("**`==strike==` Strikethrough**\n\nProduces `<del>`.".to_string())
+            } else if marker_text.starts_with("~~") {
+                Some("**`~~sub~~` Subscript**\n\nProduces `<sub>`.".to_string())
+            } else if marker_text.starts_with("^^") {
+                Some("**`^^super^^` Superscript**\n\nProduces `<sup>`.".to_string())
+            } else {
+                None
+            }
+        }
+        // Comment and Link have their own dedicated hover handlers.
+        MarkupKind::Comment | MarkupKind::Link => None,
+    }
+}
+
+fn try_block_markup_hover(
+    text: &str,
+    byte_offset: usize,
+    passage: Option<&knot_core::Passage>,
+) -> Option<Hover> {
+    // ── Phase 6: zone-map based detection ──────────────────────────
+    //
+    // Try the zone map first. If the cursor is on a `Markup(...)` leaf,
+    // fire the appropriate block-markup hover. This replaces the column-0
+    // marker detection with an O(log n) zone lookup.
+    //
+    // Falls back to the line-based column-0 detection if the zone map
+    // doesn't find a markup leaf (e.g., the user is mid-typing a marker
+    // and the parser hasn't recognized it yet, or for inline `{{{` which
+    // may not be at column 0).
+    if let Some(passage) = passage {
+        let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
+        if let Some(leaf) = passage.zones.leaf_at(passage_offset) {
+            if let knot_core::zoning::LeafKind::Markup(kind) = &leaf.kind {
+                // Build hover text from the markup kind. We need to extract
+                // the marker text from the source to get the level/depth.
+                let abs_span = passage.abs_range(&leaf.span);
+                let marker_text = &text[abs_span.start.min(text.len())..abs_span.end.min(text.len())];
+                if let Some(hover_text) = build_markup_hover_text(kind, marker_text) {
+                    let range = helpers::byte_range_to_lsp_range(text, &abs_span);
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: hover_text,
+                        }),
+                        range: Some(range),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Fallback: line-based column-0 detection ─────────────────────
     let line_info = helpers::byte_offset_to_position(text, byte_offset);
     let line_idx = line_info.line as usize;
     let line = text.lines().nth(line_idx)?;
@@ -3168,7 +3366,7 @@ mod block_markup_hover_tests {
         // `!Title` — cursor on the `!`.
         let src = ":: Start\n!Title here\n";
         let offset = cursor_on(src, "!Title");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(hover.is_some(), "hover on `!` heading marker should fire");
         if let Some(h) = hover
             && let HoverContents::Markup(m) = h.contents
@@ -3196,7 +3394,7 @@ mod block_markup_hover_tests {
         // `!!Title` — cursor on the 2nd `!`.
         let src = ":: Start\n!!Subsection\n";
         let offset = cursor_on(src, "!!Subsection") + 1; // 2nd `!`
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(hover.is_some(), "hover on `!!` heading marker should fire");
         if let Some(h) = hover
             && let HoverContents::Markup(m) = h.contents
@@ -3219,7 +3417,7 @@ mod block_markup_hover_tests {
         // `!!!Title` — cursor on the 3rd `!`.
         let src = ":: Start\n!!!Sub-subsection\n";
         let offset = cursor_on(src, "!!!Sub") + 2; // 3rd `!`
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(hover.is_some(), "hover on `!!!` heading marker should fire");
         if let Some(h) = hover
             && let HoverContents::Markup(m) = h.contents
@@ -3237,7 +3435,7 @@ mod block_markup_hover_tests {
         // `* item` — cursor on the `*`.
         let src = ":: Start\n* item one\n";
         let offset = cursor_on(src, "* item");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(hover.is_some(), "hover on `*` list marker should fire");
         if let Some(h) = hover
             && let HoverContents::Markup(m) = h.contents
@@ -3260,7 +3458,7 @@ mod block_markup_hover_tests {
         // `** item` — cursor on the 2nd `*`.
         let src = ":: Start\n** nested item\n";
         let offset = cursor_on(src, "** nested") + 1;
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `**` nested list marker should fire"
@@ -3281,7 +3479,7 @@ mod block_markup_hover_tests {
         // `# item` — cursor on the `#`.
         let src = ":: Start\n# first\n";
         let offset = cursor_on(src, "# first");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `#` ordered list marker should fire"
@@ -3307,7 +3505,7 @@ mod block_markup_hover_tests {
         // `> quote` — cursor on the `>`.
         let src = ":: Start\n> quoted text\n";
         let offset = cursor_on(src, "> quoted");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `>` blockquote marker should fire"
@@ -3333,7 +3531,7 @@ mod block_markup_hover_tests {
         // `----` — cursor on a dash.
         let src = ":: Start\n----\n";
         let offset = cursor_on(src, "----");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `----` horizontal rule should fire"
@@ -3359,7 +3557,7 @@ mod block_markup_hover_tests {
         // `---` (3 dashes) is NOT a horizontal rule — needs 4+.
         let src = ":: Start\n---\n";
         let offset = cursor_on(src, "---");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_none(),
             "hover on `---` (3 dashes) should NOT fire (needs 4+)"
@@ -3371,7 +3569,7 @@ mod block_markup_hover_tests {
         // `<<<` — cursor on a `<`.
         let src = ":: Start\n<<<\nquoted\n<<<\n";
         let offset = cursor_on(src, "<<<\n");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `<<<` block blockquote should fire"
@@ -3392,7 +3590,7 @@ mod block_markup_hover_tests {
         // `{{{\n...\n}}}` — cursor on the first `{`.
         let src = ":: Start\n{{{\ncode here\n}}}\n";
         let offset = cursor_on(src, "{{{");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `{{{{` code block marker should fire"
@@ -3418,7 +3616,7 @@ mod block_markup_hover_tests {
         // `{{{code}}}` — cursor on the first `{` (mid-line, not block form).
         let src = ":: Start\nSome {{{inline code}} here.\n";
         let offset = cursor_on(src, "{{{inline");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `{{{{` inline code marker should fire"
@@ -3440,7 +3638,7 @@ mod block_markup_hover_tests {
         // The marker hover should NOT fire — `T` is not part of the `!` run.
         let src = ":: Start\n!Title\n";
         let offset = cursor_on(src, "Title");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_none(),
             "hover on heading content (not marker) should NOT fire block markup hover"
@@ -3452,7 +3650,7 @@ mod block_markup_hover_tests {
         // `Hello!` — `!` mid-line is NOT a heading marker (needs column 0).
         let src = ":: Start\nHello!\n";
         let offset = cursor_on(src, "!");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_none(),
             "hover on mid-line `!` should NOT fire (heading requires column 0)"
@@ -3464,7 +3662,7 @@ mod block_markup_hover_tests {
         // `a * b` — `*` mid-line is NOT a list marker (needs column 0).
         let src = ":: Start\na * b\n";
         let offset = cursor_on(src, "*");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_none(),
             "hover on mid-line `*` should NOT fire (list marker requires column 0)"
@@ -3476,7 +3674,7 @@ mod block_markup_hover_tests {
         // `!!!!!!Title` — 6 levels (the maximum).
         let src = ":: Start\n!!!!!!Tiny heading\n";
         let offset = cursor_on(src, "!!!!!!");
-        let hover = try_block_markup_hover(src, offset);
+        let hover = try_block_markup_hover(src, offset, None);
         assert!(
             hover.is_some(),
             "hover on `!!!!!!` h6 heading marker should fire"
@@ -3502,7 +3700,7 @@ mod block_markup_hover_tests {
         // `!!Title` — hover range should cover both `!` characters.
         let src = ":: Start\n!!Title\n";
         let offset = cursor_on(src, "!!Title");
-        let hover = try_block_markup_hover(src, offset).expect("hover should fire");
+        let hover = try_block_markup_hover(src, offset, None).expect("hover should fire");
         if let Some(range) = hover.range {
             // Line 1 (0-indexed), characters 0-2 (the `!!` run).
             assert_eq!(range.start.line, 1);
@@ -3514,6 +3712,169 @@ mod block_markup_hover_tests {
                 range.end.character
             );
         }
+    }
+}
+
+/// Phase 6 tests: `try_close_tag_hover` and `try_block_markup_hover` migrated
+/// to use `passage.zones.leaf_at()` instead of backward byte-scans and
+/// column-0 detection.
+#[cfg(test)]
+mod phase6_zone_hover_tests {
+    use super::*;
+    use knot_formats::sugarcube::SugarCubePlugin;
+    use knot_formats::FormatPluginMut;
+    use url::Url;
+
+    /// Helper: parse a source document and return (text, doc, plugin, uri).
+    fn parse(src: &str) -> (String, knot_core::Document, SugarCubePlugin, url::Url) {
+        let mut plugin = SugarCubePlugin::new();
+        let uri = Url::parse("file:///project/story.tw").unwrap();
+        let parse_result = plugin.parse_mut(&uri, src);
+        let mut doc =
+            knot_core::Document::new(uri.clone(), knot_core::passage::StoryFormat::SugarCube);
+        for passage in parse_result.passages {
+            doc.passages.push(passage);
+        }
+        (src.to_string(), doc, plugin, uri)
+    }
+
+    /// Helper: find the passage containing a document-absolute byte offset.
+    fn passage_at<'a>(doc: &'a knot_core::Document, offset: usize) -> Option<&'a knot_core::Passage> {
+        doc.passages.iter().find(|p| p.contains_abs_offset(offset))
+    }
+
+    /// Hover on `<</if>>` close tag should fire via the zone map.
+    #[test]
+    fn close_tag_hover_fires_via_zone_map() {
+        let src = ":: Start\n<<if $x>>\n  text\n<</if>>";
+        let (text, doc, plugin, _uri) = parse(src);
+        let close_offset = src.find("<</if>>").unwrap();
+        let passage = passage_at(&doc, close_offset);
+        let hover = try_close_tag_hover(&text, close_offset, passage, &plugin);
+        assert!(
+            hover.is_some(),
+            "close-tag hover should fire on <</if>> via zone map"
+        );
+        if let Some(h) = hover
+            && let HoverContents::Markup(m) = h.contents
+        {
+            assert!(
+                m.value.contains("Close tag"),
+                "hover text should mention 'Close tag': got {}",
+                m.value
+            );
+            assert!(
+                m.value.contains("if"),
+                "hover text should mention 'if': got {}",
+                m.value
+            );
+        }
+    }
+
+    /// Hover on `!` of a heading should fire via the zone map.
+    #[test]
+    fn heading_hover_fires_via_zone_map() {
+        let src = ":: Start\n!Title here\n";
+        let (text, doc, _plugin, _uri) = parse(src);
+        let heading_offset = src.find("!Title").unwrap();
+        let passage = passage_at(&doc, heading_offset);
+        let hover = try_block_markup_hover(&text, heading_offset, passage);
+        assert!(
+            hover.is_some(),
+            "block-markup hover should fire on `!` heading via zone map"
+        );
+        if let Some(h) = hover
+            && let HoverContents::Markup(m) = h.contents
+        {
+            assert!(
+                m.value.contains("Heading"),
+                "hover text should mention 'Heading': got {}",
+                m.value
+            );
+        }
+    }
+
+    /// Hover on `*` of a list item should fire via the zone map.
+    #[test]
+    fn list_item_hover_fires_via_zone_map() {
+        let src = ":: Start\n* item one\n";
+        let (text, doc, _plugin, _uri) = parse(src);
+        let list_offset = src.find("* item").unwrap();
+        let passage = passage_at(&doc, list_offset);
+        let hover = try_block_markup_hover(&text, list_offset, passage);
+        assert!(
+            hover.is_some(),
+            "block-markup hover should fire on `*` list item via zone map"
+        );
+        if let Some(h) = hover
+            && let HoverContents::Markup(m) = h.contents
+        {
+            assert!(
+                m.value.contains("List Item"),
+                "hover text should mention 'List Item': got {}",
+                m.value
+            );
+        }
+    }
+
+    /// Hover on `----` horizontal rule should fire via the zone map.
+    #[test]
+    fn horizontal_rule_hover_fires_via_zone_map() {
+        let src = ":: Start\n----\n";
+        let (text, doc, _plugin, _uri) = parse(src);
+        let hr_offset = src.find("----").unwrap();
+        let passage = passage_at(&doc, hr_offset);
+        let hover = try_block_markup_hover(&text, hr_offset, passage);
+        assert!(
+            hover.is_some(),
+            "block-markup hover should fire on `----` via zone map"
+        );
+        if let Some(h) = hover
+            && let HoverContents::Markup(m) = h.contents
+        {
+            assert!(
+                m.value.contains("Horizontal Rule"),
+                "hover text should mention 'Horizontal Rule': got {}",
+                m.value
+            );
+        }
+    }
+
+    /// Hover on `''bold''` text format should fire via the zone map.
+    #[test]
+    fn text_format_hover_fires_via_zone_map() {
+        let src = ":: Start\n''bold text''\n";
+        let (text, doc, _plugin, _uri) = parse(src);
+        let bold_offset = src.find("''bold").unwrap();
+        let passage = passage_at(&doc, bold_offset);
+        let hover = try_block_markup_hover(&text, bold_offset, passage);
+        assert!(
+            hover.is_some(),
+            "block-markup hover should fire on `''bold''` via zone map"
+        );
+        if let Some(h) = hover
+            && let HoverContents::Markup(m) = h.contents
+        {
+            assert!(
+                m.value.contains("Bold"),
+                "hover text should mention 'Bold': got {}",
+                m.value
+            );
+        }
+    }
+
+    /// Hover on prose text should NOT fire block-markup hover via zone map.
+    #[test]
+    fn prose_does_not_fire_block_markup_hover() {
+        let src = ":: Start\nHello world\n";
+        let (text, doc, _plugin, _uri) = parse(src);
+        let prose_offset = src.find("Hello").unwrap();
+        let passage = passage_at(&doc, prose_offset);
+        let hover = try_block_markup_hover(&text, prose_offset, passage);
+        assert!(
+            hover.is_none(),
+            "block-markup hover should NOT fire on prose text"
+        );
     }
 }
 
@@ -3922,5 +4283,228 @@ mod link_hover_tests {
                 m.value
             );
         }
+    }
+}
+
+/// Phase 3 tests: `check_container_violation` migrated to use the unified
+/// zone map (`passage.zones.enclosing_body_at`) instead of the hand-rolled
+/// innermost-enclosing-macro loop.
+#[cfg(test)]
+mod container_violation_tests {
+    use super::*;
+    use knot_formats::sugarcube::SugarCubePlugin;
+    use knot_formats::FormatPlugin;
+    use knot_formats::FormatPluginMut;
+    use url::Url;
+
+    /// Helper: parse a single-passage document and return (doc, plugin).
+    /// The plugin's `parse_mut` goes through the full pipeline, so
+    /// `passage.zones` is populated.
+    fn parse(src: &str) -> (knot_core::Document, SugarCubePlugin) {
+        let mut plugin = SugarCubePlugin::new();
+        let uri = Url::parse("file:///project/story.tw").unwrap();
+        let parse_result = plugin.parse_mut(&uri, src);
+        let mut doc =
+            knot_core::Document::new(uri.clone(), knot_core::passage::StoryFormat::SugarCube);
+        for passage in parse_result.passages {
+            doc.passages.push(passage);
+        }
+        (doc, plugin)
+    }
+
+    /// Helper: find the first passage in a document.
+    fn first_passage(doc: &knot_core::Document) -> &knot_core::Passage {
+        doc.passages
+            .first()
+            .expect("document should have at least one passage")
+    }
+
+    /// Helper: find a macro def by name from the plugin.
+    fn macro_def<'a>(
+        plugin: &'a SugarCubePlugin,
+        name: &'a str,
+    ) -> Option<&'a knot_formats::types::MacroDef> {
+        plugin.find_macro(name)
+    }
+
+    /// `<<else>>` inside `<<if>>...<</if>>` → no violation.
+    #[test]
+    fn else_inside_if_no_violation() {
+        let src = ":: Start\n<<if $x>>\n  text\n<<else>>\n  more\n<</if>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "else").expect("<<else>> should be in catalog");
+
+        // Cursor on `<<else>>` — find its document-absolute offset.
+        let else_offset = src.find("<<else>>").unwrap();
+        let violation = check_container_violation(mdef, passage, else_offset, &plugin);
+        assert!(
+            violation.is_none(),
+            "<<else>> inside <<if>> should NOT be a violation, got: {:?}",
+            violation
+        );
+    }
+
+    /// `<<else>>` at top level (no `<<if>>`) → violation.
+    #[test]
+    fn else_at_top_level_is_violation() {
+        let src = ":: Start\n<<else>> text";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "else").expect("<<else>> should be in catalog");
+
+        let else_offset = src.find("<<else>>").unwrap();
+        let violation = check_container_violation(mdef, passage, else_offset, &plugin);
+        assert!(
+            violation.is_some(),
+            "<<else>> at top level should be a violation"
+        );
+        let msg = violation.unwrap();
+        assert!(
+            msg.contains("must be inside"),
+            "violation message should say 'must be inside': {}",
+            msg
+        );
+        assert!(
+            !msg.contains("currently inside"),
+            "top-level violation should NOT say 'currently inside': {}",
+            msg
+        );
+    }
+
+    /// **The post-close-sibling bug case (plan.md §6.5)**:
+    /// `<<if $x>>...<</if>> <<else>>` — cursor on `<<else>>` which is
+    /// OUTSIDE `<<if>>`'s body (after `<</if>>`). The OLD code got this
+    /// wrong (it approximated "inside body" with "after open tag end" and
+    /// thought the cursor was still inside `<<if>>`). The NEW zone-based
+    /// code correctly reports a violation.
+    #[test]
+    fn else_after_closed_if_is_violation() {
+        let src = ":: Start\n<<if $x>>\n  text\n<</if>>\n<<else>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "else").expect("<<else>> should be in catalog");
+
+        let else_offset = src.find("<<else>>").unwrap();
+        let violation = check_container_violation(mdef, passage, else_offset, &plugin);
+        assert!(
+            violation.is_some(),
+            "<<else>> after <</if>> should be a violation (the old code got this wrong)"
+        );
+        let msg = violation.unwrap();
+        assert!(
+            msg.contains("must be inside"),
+            "violation message should say 'must be inside': {}",
+            msg
+        );
+        // Crucially, it should NOT claim we're "currently inside" anything —
+        // the cursor is at the top level after <</if>> closed.
+        assert!(
+            !msg.contains("currently inside"),
+            "post-close-sibling violation should NOT say 'currently inside' (old bug): {}",
+            msg
+        );
+    }
+
+    /// `<<case>>` inside `<<switch>>...<</switch>>` → no violation.
+    #[test]
+    fn case_inside_switch_no_violation() {
+        let src = ":: Start\n<<switch $x>>\n<<case 1>>\n  a\n<<default>>\n  b\n<</switch>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "case").expect("<<case>> should be in catalog");
+
+        let case_offset = src.find("<<case").unwrap();
+        let violation = check_container_violation(mdef, passage, case_offset, &plugin);
+        assert!(
+            violation.is_none(),
+            "<<case>> inside <<switch>> should NOT be a violation, got: {:?}",
+            violation
+        );
+    }
+
+    /// `<<case>>` at top level (no `<<switch>>`) → violation.
+    #[test]
+    fn case_at_top_level_is_violation() {
+        let src = ":: Start\n<<case 1>> text";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "case").expect("<<case>> should be in catalog");
+
+        let case_offset = src.find("<<case").unwrap();
+        let violation = check_container_violation(mdef, passage, case_offset, &plugin);
+        assert!(
+            violation.is_some(),
+            "<<case>> at top level should be a violation"
+        );
+        let msg = violation.unwrap();
+        assert!(
+            msg.contains("must be inside"),
+            "violation message should say 'must be inside': {}",
+            msg
+        );
+    }
+
+    /// `<<else>>` inside `<<if>>` nested inside `<<link>>` → no violation.
+    /// Tests that the zone map correctly walks up the parent chain.
+    #[test]
+    fn else_in_nested_if_no_violation() {
+        let src = ":: Start\n<<link \"Go\">>\n  <<if $x>>\n    text\n  <<else>>\n    more\n  <</if>>\n<</link>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "else").expect("<<else>> should be in catalog");
+
+        let else_offset = src.find("<<else>>").unwrap();
+        let violation = check_container_violation(mdef, passage, else_offset, &plugin);
+        assert!(
+            violation.is_none(),
+            "<<else>> inside <<if>> inside <<link>> should NOT be a violation, got: {:?}",
+            violation
+        );
+    }
+
+    /// `<<break>>` inside `<<for>>` → no violation.
+    #[test]
+    fn break_inside_for_no_violation() {
+        let src = ":: Start\n<<for _i to 0; _i lt 5; _i++>>\n  <<break>>\n<</for>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "break").expect("<<break>> should be in catalog");
+
+        let break_offset = src.find("<<break>>").unwrap();
+        let violation = check_container_violation(mdef, passage, break_offset, &plugin);
+        assert!(
+            violation.is_none(),
+            "<<break>> inside <<for>> should NOT be a violation, got: {:?}",
+            violation
+        );
+    }
+
+    /// `<<break>>` inside `<<if>>` (not `<<for>>`) → violation.
+    /// `<<break>>` requires `<<for>>`, not `<<if>>`.
+    #[test]
+    fn break_inside_if_is_violation() {
+        let src = ":: Start\n<<if $x>>\n  <<break>>\n<</if>>";
+        let (doc, plugin) = parse(src);
+        let passage = first_passage(&doc);
+        let mdef = macro_def(&plugin, "break").expect("<<break>> should be in catalog");
+
+        let break_offset = src.find("<<break>>").unwrap();
+        let violation = check_container_violation(mdef, passage, break_offset, &plugin);
+        assert!(
+            violation.is_some(),
+            "<<break>> inside <<if>> (not <<for>>) should be a violation"
+        );
+        let msg = violation.unwrap();
+        assert!(
+            msg.contains("must be inside"),
+            "violation message should say 'must be inside': {}",
+            msg
+        );
+        assert!(
+            msg.contains("currently inside"),
+            "violation message should say 'currently inside `<<if>>`': {}",
+            msg
+        );
     }
 }

@@ -118,24 +118,10 @@ impl std::fmt::Display for MacroCategory {
 ///
 /// The tree builder uses this to determine how to handle an open macro tag
 /// that has no matching close tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BodyRequirement {
-    /// Always inline — no body, no close tag expected.
-    /// Examples: `<<set>>`, `<<print>>`, `<<goto>>`, `<<run>>`, `<<unset>>`
-    Never,
-
-    /// Always block — body is required, close tag is expected.
-    /// Unclosed blocks produce a diagnostic.
-    /// Examples: `<<if>>`, `<<for>>`, `<<switch>>`, `<<widget>>`, `<<link>>`
-    Required,
-
-    /// Body is optional — close tag is allowed but not required.
-    /// If a close tag is present, content between open/close becomes children.
-    /// If no close tag, content until the next sibling macro becomes children.
-    /// No "unclosed" diagnostic is produced.
-    /// Examples: `<<case>>`, `<<default>>` (can use `<</case>>` or not)
-    Optional,
-}
+///
+/// This type is defined in `knot-core` and re-exported here for backward
+/// compatibility. See [`knot_core::types::BodyRequirement`].
+pub use knot_core::types::BodyRequirement;
 
 /// The structural kind of a macro — determines its role in the macro tree.
 ///
@@ -152,23 +138,10 @@ pub enum BodyRequirement {
 /// Sub-macros are only valid inside their parent container(s) — they are
 /// filtered from top-level completions when the cursor is outside a valid
 /// parent block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MacroKind {
-    /// A macro that opens a closeable body section — always needs `<</name>>`.
-    /// Examples: `<<if>>`, `<<for>>`, `<<link>>`, `<<button>>`, `<<widget>>`
-    Container,
-
-    /// A standalone macro that never has a body or close tag.
-    /// Examples: `<<set>>`, `<<goto>>`, `<<print>>`, `<<audio>>`, `<<remove>>`
-    Inline,
-
-    /// A macro only valid inside a specific parent container.
-    /// The `container` / `container_any_of` field on `MacroDef` specifies
-    /// which parent(s) are valid.
-    /// Examples: `<<else>>` (inside `<<if>>`), `<<break>>` (inside `<<for>>`),
-    /// `<<case>>` (inside `<<switch>>`), `<<next>>` (inside `<<timed>>`)
-    SubMacro,
-}
+///
+/// This type is defined in `knot-core` and re-exported here for backward
+/// compatibility. See [`knot_core::types::MacroKind`].
+pub use knot_core::types::MacroKind;
 
 /// A format-specific macro definition entry.
 #[derive(Debug, Clone)]

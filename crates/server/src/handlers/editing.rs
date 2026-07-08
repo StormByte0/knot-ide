@@ -15,15 +15,49 @@ pub(crate) async fn formatting(
     let uri = helpers::normalize_file_uri(&params.text_document.uri);
     let inner = state.inner.read().await;
 
-    let Some(text) = inner.open_documents.get(&uri) else {
+    let Some(text) = inner.open_documents.get(&uri).cloned() else {
         return Ok(None);
     };
 
-    let edits = helpers::format_twee_text(text);
-    if edits.is_empty() {
-        Ok(None)
+    // Try the zone-aware formatter first (Phase 10). If the format plugin
+    // supports zone-based formatting, use it; otherwise fall back to the
+    // whitespace-only formatter.
+    let format = inner.workspace.resolve_format();
+    let plugin = inner.format_registry.get(&format);
+    let doc = inner.workspace.get_document(&uri);
+
+    let edits = if let (Some(plugin), Some(doc)) = (plugin, doc) {
+        // Zone-aware formatting path. The plugin's `format_passage` returns
+        // None for passages with Error leaves — those are emitted as-is.
+        helpers::format_twee_text_with_zones(&text, doc, plugin)
     } else {
+        // Fallback: whitespace-only formatting (no parsed document available).
+        helpers::format_twee_text(&text)
+    };
+
+    // Drop the read lock before acquiring the write lock to invalidate
+    // the semantic tokens cache. This prevents a race condition where the
+    // client requests semantic tokens between the format response and the
+    // did_change notification — without invalidation, the server returns
+    // stale tokens (pre-format byte offsets) for the post-format text,
+    // causing visible span shifts in the editor.
+    drop(inner);
+
+    if !edits.is_empty() {
+        // Invalidate the semantic tokens cache so that any semantic_tokens_full
+        // request arriving before did_change is processed returns None (VS Code
+        // re-requests after the next workspace/semanticTokens/refresh). This
+        // closes the "stale tokens after format" race window.
+        let mut inner_mut = state.inner.write().await;
+        inner_mut.semantic_tokens.remove(&uri);
+        // Also schedule an immediate refresh (not debounced) so the client
+        // re-requests tokens as soon as did_change arrives with the new text.
+        drop(inner_mut);
+        state.schedule_semantic_token_refresh().await;
+
         Ok(Some(edits))
+    } else {
+        Ok(None)
     }
 }
 

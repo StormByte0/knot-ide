@@ -1981,6 +1981,33 @@ pub trait FormatPlugin: Send + Sync {
     }
 
     // -----------------------------------------------------------------------
+    // Formatting (optional — Phase 10 SugarCube formatter)
+    // -----------------------------------------------------------------------
+
+    /// Format a single passage body using the format's zone-aware formatter.
+    ///
+    /// Returns `None` by default (format doesn't support zone-based formatting).
+    /// SugarCube overrides this to call
+    /// [`sugarcube::formatter::format_passage`](crate::sugarcube::formatter::format_passage).
+    ///
+    /// `body_text` is the passage body content (after the `:: Name` header line).
+    /// `zones` is the zone map for the same body. The caller is responsible
+    /// for ensuring the body text and zone spans are aligned (both relative
+    /// to the body start, or both relative to the passage head with the same
+    /// `body_offset_in_passage`).
+    ///
+    /// Returns `Some(formatted_text)` if formatting succeeded, or `None` if
+    /// the formatter refused (e.g., the input contains parse errors) or the
+    /// format doesn't support zone-based formatting.
+    fn format_passage(
+        &self,
+        _body_text: &str,
+        _zones: &knot_core::zoning::ZoneMap,
+    ) -> Option<String> {
+        None
+    }
+
+    // -----------------------------------------------------------------------
     // Registry lifecycle (optional — incremental re-parse support)
     // -----------------------------------------------------------------------
 }

@@ -125,6 +125,71 @@ impl VarAccessKind {
 }
 
 // ---------------------------------------------------------------------------
+// VarOrigin — the zone context in which a variable access occurs (Phase 9)
+// ---------------------------------------------------------------------------
+
+/// The zone context in which a variable access occurs.
+///
+/// Populated during `collect_var_ops_from_nodes` by querying the `ZoneMap` at
+/// the variable's span. This is a *capability unlock* for future features
+/// (e.g., "show all variables read inside `<<link>>` bodies", "warn about
+/// variables set in `<<script>>` that should be in `<<set>>`"). It does not
+/// affect existing variable-tracker behavior — the LSP wire type does not
+/// expose it (it's internal-only for now).
+///
+/// ## Variants and when they occur
+///
+/// - `Prose` — the variable appears in bare narrative text at the top level
+///   of the passage (not inside any macro body). Example: `$gold` in passage
+///   body text like `You have $gold gold pieces.`
+/// - `MacroArg { macro_name }` — the variable appears in a macro's argument
+///   list. Example: `$foo` in `<<set $foo to 1>>` has `macro_name: "set"`.
+///   Also covers `<<print $x>>`, `<<capture $x>>`, `<<for _i, $x in ...>>`,
+///   and inline JS expressions inside macro args (`<<set $x to $y + 1>>`
+///   where `$y` is classified via oxc).
+/// - `MacroBody { enclosing_macro, depth }` — the variable appears in prose
+///   or markup text *inside* a macro's body. Example: `$gold` in
+///   `<<link "X">>You find $gold.<</link>>` has `enclosing_macro: "link"`,
+///   `depth: 1`. Nested bodies increment depth: `<<link>><<if>>$x<</if>><</link>>`
+///   gives `depth: 2`.
+/// - `Expression` — the variable appears inside an `<<=>>expr>>` or
+///   `<<->>expr>>` expression macro. These are SugarCube's inline expression
+///   forms; their args are JS expressions, classified separately from regular
+///   macros.
+/// - `LinkSetter` — reserved for setter-link variables (`[[X->Y][$var = 1]]`).
+///   Not currently produced by `collect_var_ops_from_nodes` (Link AST nodes
+///   are not processed there), but included for completeness so future
+///   Link-processing code can use it.
+/// - `RawScript` — the variable appears inside a `<<script>>` body (raw JS)
+///   or in a `[script]`-tagged passage. These are processed by oxc, not the
+///   SugarCube parser; the zone engine does not recurse into them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VarOrigin {
+    /// Bare narrative text at the top level of the passage.
+    Prose,
+    /// Inside a macro's argument list.
+    MacroArg { macro_name: String },
+    /// Inside a macro's body (prose/markup text between open and close tags).
+    MacroBody { enclosing_macro: String, depth: u32 },
+    /// Inside an `<<=>>expr>>` or `<<->>expr>>` expression macro.
+    Expression,
+    /// Inside a setter link (`[[...][$var = ...]]`). Reserved — not yet produced.
+    LinkSetter,
+    /// Inside a `<<script>>` body or `[script]` passage (raw JS via oxc).
+    RawScript,
+}
+
+impl Default for VarOrigin {
+    /// The default origin for variable accesses when the zone context is
+    /// unavailable (e.g., in tests that call `record_var` directly without
+    /// going through the full parse pipeline). Defaults to `Prose`, the most
+    /// common origin in hand-written tests.
+    fn default() -> Self {
+        Self::Prose
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VarAccess — a single variable access record
 // ---------------------------------------------------------------------------
 
@@ -191,6 +256,13 @@ pub struct VarAccess {
     /// Empty for non-block writes (single-property assignments); in that
     /// case propagation falls back to the access's construct_span or span.
     pub segment_construct_spans: Vec<Range<usize>>,
+    /// The zone context in which this access occurs (Phase 9).
+    ///
+    /// Populated by `collect_var_ops_from_nodes` via a `ZoneMap` lookup at
+    /// the variable's span. See [`VarOrigin`] for the variant semantics.
+    /// Defaults to [`VarOrigin::Prose`] when constructed via `record_var`
+    /// without the origin parameter (e.g., in tests).
+    pub origin: VarOrigin,
 }
 
 impl VarAccess {
@@ -239,6 +311,7 @@ impl VarAccess {
             construct_span: self.construct_span.clone(),
             segment_spans: self.segment_spans.clone(),
             segment_construct_spans: self.segment_construct_spans.clone(),
+            origin: self.origin.clone(),
         }
     }
 }
@@ -1217,6 +1290,10 @@ impl VariableTree {
     /// `VariableTree::record_var()`. The access is recorded at the
     /// exact node specified by `name` + `property_path`, then
     /// propagated up to all ancestor nodes.
+    ///
+    /// The access's [`VarOrigin`] defaults to [`VarOrigin::Prose`]. Use
+    /// [`record_var_with_origin`](Self::record_var_with_origin) to specify
+    /// the zone context (used by the production parse pipeline in Phase 9).
     #[allow(clippy::too_many_arguments)]
     pub fn record_var(
         &mut self,
@@ -1231,6 +1308,45 @@ impl VariableTree {
         segment_spans: &[Range<usize>],
         construct_span: Option<Range<usize>>,
         segment_construct_spans: &[Range<usize>],
+    ) {
+        self.record_var_with_origin(
+            name,
+            is_temporary,
+            kind,
+            passage_name,
+            file_uri,
+            span,
+            property_path,
+            body_text,
+            segment_spans,
+            construct_span,
+            segment_construct_spans,
+            VarOrigin::default(),
+        );
+    }
+
+    /// Record a variable access with an explicit [`VarOrigin`] (Phase 9).
+    ///
+    /// Same as [`record_var`](Self::record_var) but accepts the zone context
+    /// in which the access occurs. The production parse pipeline
+    /// (`populate_registries_from_unified_ast`) uses this to thread the
+    /// `VarOrigin` computed by `collect_var_ops_from_nodes` (via `ZoneMap`
+    /// lookups) into the stored `VarAccess` record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_var_with_origin(
+        &mut self,
+        name: &str,
+        is_temporary: bool,
+        kind: VarAccessKind,
+        passage_name: &str,
+        file_uri: &str,
+        span: Range<usize>,
+        property_path: &str,
+        body_text: &str,
+        segment_spans: &[Range<usize>],
+        construct_span: Option<Range<usize>>,
+        segment_construct_spans: &[Range<usize>],
+        origin: VarOrigin,
     ) {
         let line = compute_line_from_offset(body_text, span.start);
         let scope = if is_temporary {
@@ -1256,6 +1372,7 @@ impl VariableTree {
             construct_span: construct_span.clone(),
             segment_spans: segment_spans.to_vec(),
             segment_construct_spans: segment_construct_spans.to_vec(),
+            origin,
         };
 
         // Find or create the root variable node

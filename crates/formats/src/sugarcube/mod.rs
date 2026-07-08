@@ -61,6 +61,7 @@ pub mod registries;
 // Root-level modules (unchanged)
 pub mod ast;
 pub mod classifier;
+pub mod formatter;
 pub mod lexer;
 pub mod macros;
 pub mod parse_pipeline;
@@ -1559,6 +1560,7 @@ impl FormatPlugin for SugarCubePlugin {
             if before_cursor.ends_with("<<") {
                 return self.build_macro_completions(
                     workspace,
+                    uri,
                     "",
                     line,
                     character,
@@ -1575,6 +1577,7 @@ impl FormatPlugin for SugarCubePlugin {
                 {
                     return self.build_macro_completions(
                         workspace,
+                        uri,
                         after,
                         line,
                         character,
@@ -1885,6 +1888,7 @@ impl FormatPlugin for SugarCubePlugin {
                 let name = after.trim();
                 return self.build_macro_completions(
                     workspace,
+                    uri,
                     name,
                     line,
                     character,
@@ -1975,6 +1979,19 @@ impl FormatPlugin for SugarCubePlugin {
 
         // Default: offer workspace symbols (passages, variables, macros)
         self.build_default_completions(workspace)
+    }
+
+    /// SugarCube zone-aware passage formatter (Phase 10).
+    ///
+    /// Delegates to [`formatter::format_passage`]. Returns `None` if the
+    /// formatter refuses (Error leaves present) — the caller falls back to
+    /// the default whitespace-only formatter in that case.
+    fn format_passage(
+        &self,
+        body_text: &str,
+        zones: &knot_core::zoning::ZoneMap,
+    ) -> Option<String> {
+        formatter::format_passage(body_text, zones)
     }
 }
 
@@ -2168,6 +2185,16 @@ fn build_open_macro_stack_at_offset(
 ///
 /// If the cursor is at the top level (not inside any container macro), returns
 /// an empty vector.
+///
+/// # Deprecated
+///
+/// This function performs an O(document-length) text scan from byte 0 to the
+/// cursor on every call. Phase 4 migrated `build_macro_completions` to use
+/// `passage.zones.body_stack_at()` instead (O(depth)). This function is
+/// retained only as a fallback for when the zone map is unavailable, and for
+/// the existing unit tests. It will be removed in Phase 7 once all callers
+/// are migrated.
+#[deprecated(note = "Use `passage.zones.body_stack_at()` instead (Phase 4 migration).")]
 fn find_enclosing_block_macros(
     text: &str,
     byte_offset: usize,
@@ -2470,7 +2497,8 @@ impl SugarCubePlugin {
     /// the prefix are included.
     fn build_macro_completions(
         &self,
-        _workspace: &knot_core::Workspace,
+        workspace: &knot_core::Workspace,
+        uri: &url::Url,
         filter_prefix: &str,
         line: u32,
         character: u32,
@@ -2488,8 +2516,55 @@ impl SugarCubePlugin {
         let after_cursor = &text[byte_offset..];
 
         // ── Determine enclosing block macros for sub-macro filtering ──
+        //
+        // Phase 4 migration: replaced `find_enclosing_block_macros(text, byte_offset, &body_macros)`
+        // (an O(document-length) text scan from byte 0 to cursor) with a zone-map
+        // query (`passage.zones.body_stack_at`), which is O(depth).
+        //
+        // The zone map's `body_stack_at` returns all ancestor macro bodies
+        // (outermost-first). We filter to bodies whose `body_requirement` is
+        // `Required` or `Optional` (i.e., not `Never`) to match the old
+        // `body_macro_names()` filter.
+        //
+        // **Fallback**: if the zone map returns an empty stack (which can
+        // happen when the user is mid-typing an incomplete `<<` that the
+        // parser pairs unexpectedly), fall back to the old text-scan. This
+        // preserves the old behavior for incomplete input — the text-scan
+        // is more forgiving of incomplete macros because it doesn't build
+        // a tree, it just tracks open/close pairs.
         let body_macros = self.body_macro_names();
-        let enclosing = find_enclosing_block_macros(text, byte_offset, &body_macros);
+        let enclosing: Vec<String> = {
+            let zone_result = if let Some(doc) = workspace.get_document(uri) {
+                let passage = doc.passages.iter().find(|p| p.contains_abs_offset(byte_offset));
+                if let Some(passage) = passage {
+                    let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
+                    passage
+                        .zones
+                        .body_stack_at(passage_offset)
+                        .into_iter()
+                        .filter(|body| {
+                            matches!(
+                                body.body_requirement,
+                                Some(crate::types::BodyRequirement::Required)
+                                    | Some(crate::types::BodyRequirement::Optional)
+                            )
+                        })
+                        .map(|body| body.macro_name.clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            if !zone_result.is_empty() {
+                zone_result
+            } else {
+                // Fallback to text-scan for incomplete input.
+                #[allow(deprecated)]
+                find_enclosing_block_macros(text, byte_offset, &body_macros)
+            }
+        };
         let parent_constraints = macros::macro_parent_constraints();
 
         // ── Builtin macros ────────────────────────────────────────────
@@ -3515,7 +3590,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, "", 0, 2, text, 2);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", 0, 2, text, 2);
         assert!(
             !items.is_empty(),
             "build_macro_completions returned {} items, expected > 0",
@@ -4646,6 +4721,7 @@ mod completion_debug_tests {
             special_def: None,
             position: None,
             passage_offset,
+            zones: knot_core::zoning::ZoneMap::default(),
         });
         workspace.insert_document(doc);
 
@@ -4884,7 +4960,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
         let inline = items
             .iter()
             .find(|i| i.insert_text.as_deref() == Some("mywidget ${1:arg1} ${2:arg2}>>"))
@@ -4906,7 +4982,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
         // Find the inline form (label is `<<mywidget>>` without `...<</mywidget>>`)
         let inline = items
             .iter()
@@ -4934,7 +5010,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
         let inline = items
             .iter()
             .find(|i| i.label == "<<nowidget>>" && !i.label.contains("</"))
@@ -4957,7 +5033,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
         let item = items
             .iter()
             .find(|i| i.label == "<<mymacro>>")
@@ -5135,6 +5211,7 @@ fn make_workspace_with_passages(uri: &Url, names: &[&str]) -> knot_core::Workspa
             special_def: None,
             position: None,
             passage_offset: offset,
+            zones: knot_core::zoning::ZoneMap::default(),
         });
     }
     workspace.insert_document(doc);
@@ -5143,6 +5220,7 @@ fn make_workspace_with_passages(uri: &Url, names: &[&str]) -> knot_core::Workspa
 
 #[cfg(test)]
 mod phase2_tests {
+    #![allow(deprecated)]
     use super::*;
 
     fn body_macros() -> HashSet<&'static str> {
@@ -6016,5 +6094,183 @@ mod temp_var_scope_tests {
             "Persistent $silver from Inventory should be visible from Start (global scope), got: {:?}",
             labels
         );
+    }
+}
+
+/// Phase 4 tests: `build_macro_completions` migrated to use
+/// `passage.zones.body_stack_at()` instead of the O(document-length)
+/// `find_enclosing_block_macros` text scan.
+///
+/// These tests verify that SubMacro filtering (e.g., `<<else>>` only offered
+/// inside `<<if>>`) works correctly via the zone map, and that the zone-map
+/// path produces the same results as the old text-scan path.
+#[cfg(test)]
+mod phase4_zone_completion_tests {
+    use super::*;
+    use crate::FormatPluginMut;
+    use knot_core::Workspace;
+
+    /// Helper: parse a source document into a workspace + plugin.
+    fn parse(src: &str) -> (knot_core::Workspace, SugarCubePlugin, url::Url) {
+        let mut plugin = SugarCubePlugin::new();
+        let uri = Url::parse("file:///test.twee").unwrap();
+        let result = plugin.parse_mut(&uri, src);
+        let mut workspace = Workspace::new(uri.clone());
+        let mut doc =
+            knot_core::Document::new(uri.clone(), knot_core::passage::StoryFormat::SugarCube);
+        doc.passages = result.passages.clone();
+        workspace.insert_document(doc);
+        (workspace, plugin, uri)
+    }
+
+    /// Helper: get completion labels from `build_macro_completions` at a cursor offset.
+    fn macro_completion_labels(
+        plugin: &SugarCubePlugin,
+        workspace: &Workspace,
+        uri: &url::Url,
+        text: &str,
+        byte_offset: usize,
+    ) -> Vec<String> {
+        let items = plugin.build_macro_completions(workspace, uri, "", 0, 0, text, byte_offset);
+        items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    /// `<<else>>` should appear in completions when cursor is inside `<<if>>`'s body.
+    #[test]
+    fn else_offered_inside_if_body() {
+        let src = ":: Start\n<<if $x>>\n  <<\n<</if>>";
+        let (workspace, plugin, uri) = parse(src);
+        // Cursor after `<<` on line 2 (inside <<if>>'s body).
+        let cursor_offset = src.find("  <<").unwrap() + 4; // after the `<<`
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        // Look for the standalone `<<else>>` completion (not the multi-form
+        // `<<if>>…<<else>>…<</if>>` which is always offered for `<<if>>`).
+        assert!(
+            labels.iter().any(|l| l == "<<else>>"),
+            "<<else>> should be offered inside <<if>> body, got: {:?}",
+            labels
+        );
+    }
+
+    /// `<<else>>` should NOT appear in completions when cursor is at top level
+    /// (not inside `<<if>>`).
+    #[test]
+    fn else_not_offered_at_top_level() {
+        let src = ":: Start\n<<";
+        let (workspace, plugin, uri) = parse(src);
+        // Cursor after `<<` on line 1 (top level).
+        let cursor_offset = src.find("<<").unwrap() + 2;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        // The standalone `<<else>>` label should NOT appear.
+        assert!(
+            !labels.iter().any(|l| l == "<<else>>"),
+            "<<else>> should NOT be offered at top level, got: {:?}",
+            labels
+        );
+    }
+
+    /// `<<case>>` should appear in completions when cursor is inside `<<switch>>`'s body.
+    #[test]
+    fn case_offered_inside_switch_body() {
+        let src = ":: Start\n<<switch $x>>\n  <<\n<</switch>>";
+        let (workspace, plugin, uri) = parse(src);
+        let cursor_offset = src.find("  <<").unwrap() + 4;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        assert!(
+            labels.iter().any(|l| l == "<<case>>" || l.starts_with("<<case ")),
+            "<<case>> should be offered inside <<switch>> body, got: {:?}",
+            labels
+        );
+    }
+
+    /// `<<case>>` should NOT appear in completions when cursor is inside `<<if>>` (wrong parent).
+    #[test]
+    fn case_not_offered_inside_if_body() {
+        let src = ":: Start\n<<if $x>>\n  <<\n<</if>>";
+        let (workspace, plugin, uri) = parse(src);
+        let cursor_offset = src.find("  <<").unwrap() + 4;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        assert!(
+            !labels.iter().any(|l| l == "<<case>>" || l.starts_with("<<case ")),
+            "<<case>> should NOT be offered inside <<if>> (wrong parent), got: {:?}",
+            labels
+        );
+    }
+
+    /// `<<break>>` should appear inside `<<for>>` but NOT inside `<<if>>`.
+    #[test]
+    fn break_offered_inside_for_not_inside_if() {
+        // Inside <<for>> — <<break>> should be offered.
+        let src_for = ":: Start\n<<for _i to 0; _i lt 5; _i++>>\n  <<\n<</for>>";
+        let (workspace, plugin, uri) = parse(src_for);
+        let cursor_offset = src_for.find("  <<").unwrap() + 4;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src_for, cursor_offset);
+        assert!(
+            labels.iter().any(|l| l == "<<break>>"),
+            "<<break>> should be offered inside <<for>>, got: {:?}",
+            labels
+        );
+
+        // Inside <<if>> — <<break>> should NOT be offered.
+        let src_if = ":: Start\n<<if $x>>\n  <<\n<</if>>";
+        let (workspace, plugin, uri) = parse(src_if);
+        let cursor_offset = src_if.find("  <<").unwrap() + 4;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src_if, cursor_offset);
+        assert!(
+            !labels.iter().any(|l| l == "<<break>>"),
+            "<<break>> should NOT be offered inside <<if>>, got: {:?}",
+            labels
+        );
+    }
+
+    /// `<<else>>` should NOT be offered after `<<if>>` has closed (post-close-sibling case).
+    /// This is the same class of bug as §6.5 — the old text-scan would have
+    /// incorrectly thought the cursor was still inside `<<if>>`.
+    #[test]
+    fn else_not_offered_after_closed_if() {
+        let src = ":: Start\n<<if $x>>\n  text\n<</if>>\n<<";
+        let (workspace, plugin, uri) = parse(src);
+        // Cursor after the final `<<` (top level, after <</if>>).
+        let cursor_offset = src.rfind("<<").unwrap() + 2;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        assert!(
+            !labels.iter().any(|l| l == "<<else>>"),
+            "<<else>> should NOT be offered after <</if>> closed, got: {:?}",
+            labels
+        );
+    }
+
+    /// Nested context: `<<else>>` inside `<<if>>` inside `<<link>>` should be offered.
+    /// Tests that the zone map correctly walks up the parent chain.
+    #[test]
+    fn else_offered_in_nested_if_inside_link() {
+        let src = ":: Start\n<<link \"Go\">>\n  <<if $x>>\n    <<\n  <</if>>\n<</link>>";
+        let (workspace, plugin, uri) = parse(src);
+        let cursor_offset = src.find("    <<").unwrap() + 6;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        assert!(
+            labels.iter().any(|l| l == "<<else>>"),
+            "<<else>> should be offered inside <<if>> inside <<link>>, got: {:?}",
+            labels
+        );
+    }
+
+    /// Verify that common macros are offered at top level.
+    #[test]
+    fn top_level_completions_include_common_macros() {
+        let src = ":: Start\n<<";
+        let (workspace, plugin, uri) = parse(src);
+        let cursor_offset = src.find("<<").unwrap() + 2;
+        let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
+        // Common macros should be offered at top level. Labels are like
+        // `<<set $var to value>>` (snippet form), so we check for `<<set`.
+        for expected in &["set", "print", "if", "link", "for"] {
+            assert!(
+                labels.iter().any(|l| l.starts_with(&format!("<<{}", expected))),
+                "<<{}>> should be offered at top level, got: {:?}",
+                expected,
+                labels
+            );
+        }
     }
 }

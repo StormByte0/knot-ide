@@ -38,6 +38,7 @@ pub mod snowman;
 pub mod sugarcube;
 pub mod twine_core;
 pub mod types;
+pub mod zoning;
 
 pub use format_meta::{FormatMeta, InstalledFormat, parse_format_js, scan_storyformats_dir};
 pub use plugin::{

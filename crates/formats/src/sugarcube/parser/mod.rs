@@ -81,6 +81,7 @@ pub fn parse_passage_body(body: &str, _body_offset: usize, mode: ParseMode) -> P
                 var_ops,
                 mode,
                 script_js_analysis: None,
+                zones: crate::zoning::ZoneMap::default(),
             }
         }
         ParseMode::Interface => {
@@ -100,6 +101,7 @@ pub fn parse_passage_body(body: &str, _body_offset: usize, mode: ParseMode) -> P
                 var_ops,
                 mode,
                 script_js_analysis: None,
+                zones: crate::zoning::ZoneMap::default(),
             }
         }
         ParseMode::Script | ParseMode::Stylesheet | ParseMode::Minimal => PassageAst::empty(mode),

@@ -75,6 +75,18 @@ pub(super) fn parse_full(plugin: &mut SugarCubePlugin, uri: &Url, text: &str) ->
         let mut passage_ast = super::parser::parse_passage_body(&cp.body_text, body_offset, mode);
         pipeline_log::parse_phase1_exit(&cp.header.name, passage_ast.nodes.len());
 
+        // Phase 1b: Build the unified zone map (zoning engine).
+        // All spans are passage-relative (shifted by body_offset_in_passage).
+        // The custom macro registry is already populated from earlier [widget]
+        // and [script] passages (sort-for-processing order).
+        if matches!(mode, ParseMode::Normal | ParseMode::Widget | ParseMode::Interface) {
+            passage_ast.zones = crate::zoning::build_from_ast(
+                &passage_ast.nodes,
+                body_offset_in_passage,
+                registry.custom_macros(),
+            );
+        }
+
         // Phase 2: JS annotation pass — attach JsAnalysis to AST nodes
         if !matches!(mode, ParseMode::Stylesheet | ParseMode::Minimal) {
             let js_node_count = count_js_nodes(&passage_ast.nodes);
@@ -390,6 +402,19 @@ pub fn parse_single(
 
     // Phase 1: Structural parse
     let mut passage_ast = super::parser::parse_passage_body(passage_text, 0, mode);
+
+    // Phase 1b: Build the unified zone map (zoning engine).
+    // In parse_single, body_offset_in_passage = 0 (passage-relative spans
+    // are built directly; the caller sets passage_offset for document-absolute
+    // wire conversion at the LSP boundary).
+    if matches!(mode, ParseMode::Normal | ParseMode::Widget | ParseMode::Interface) {
+        let registry = plugin.registry();
+        passage_ast.zones = crate::zoning::build_from_ast(
+            &passage_ast.nodes,
+            0,
+            registry.custom_macros(),
+        );
+    }
 
     // Phase 2: JS annotation pass
     if !matches!(mode, ParseMode::Stylesheet | ParseMode::Minimal) {
