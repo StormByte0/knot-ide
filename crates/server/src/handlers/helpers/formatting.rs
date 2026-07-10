@@ -29,7 +29,7 @@ fn full_document_range(text: &str) -> Range {
         // Text does not end with \n — the end position is on the last
         // line, at the end of its content.
         let last_line = text.rsplit('\n').next().unwrap_or(text);
-        (num_newlines, utf16_len(last_line) as u32)
+        (num_newlines, utf16_len(last_line))
     };
 
     Range {
@@ -44,8 +44,44 @@ fn full_document_range(text: &str) -> Range {
     }
 }
 
+/// Detect the dominant line ending style of the document.
+///
+/// Scans the text for the first line break and returns its style. This
+/// follows the same CRLF-awareness pattern used throughout the codebase
+/// (see `twine_core.rs`, `snowman/mod.rs`, `chapbook/mod.rs`,
+/// `sugarcube/lexer.rs`). It's used to ensure the formatted output uses the
+/// **same** line ending as the input — critical for Windows (CRLF) files
+/// where the formatter internally normalizes to `\n`.
+///
+/// Returns `"\r\n"` for Windows CRLF, `"\n"` for Unix LF.
+fn detect_line_ending(text: &str) -> &'static str {
+    // Scan for the first \r\n (CRLF). If found, the document uses CRLF.
+    if text.contains("\r\n") {
+        return "\r\n";
+    }
+    // No CRLF — default to LF.
+    "\n"
+}
+
+/// Convert all line breaks in `text` to the target line ending style.
+///
+/// The formatter internally produces `\n`-only output. This function
+/// converts that output back to the document's native line ending so the
+/// file doesn't end up with mixed line endings on Windows (CRLF).
+fn normalize_line_endings(text: &str, line_ending: &str) -> String {
+    if line_ending == "\n" {
+        // Already LF — strip any stray \r from CRLF input.
+        return text.replace("\r\n", "\n").replace('\r', "\n");
+    }
+    // CRLF: normalize to \n first (handles any mixed input), then replace
+    // \n with \r\n.
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
+}
+
 /// Detect the trailing line ending of the text (if any), so the formatted
-/// output preserves the same line ending style. Returns `"\r\n"`, `"\n"`,
+/// output preserves the same trailing newline. Returns `"\r\n"`, `"\n"`,
 /// or `""` (no trailing newline).
 fn trailing_line_ending(text: &str) -> &'static str {
     if text.ends_with("\r\n") {
@@ -127,7 +163,12 @@ pub(crate) fn format_twee_text(text: &str) -> Vec<TextEdit> {
         }
     }
 
-    let formatted_text = formatted_lines.join("\n");
+    // Detect the document's line ending style and ensure the formatted
+    // output uses it consistently. The `lines()` iterator strips `\r`, so
+    // `formatted_lines` is `\n`-only — we must convert back to the original
+    // style to avoid mixed line endings on Windows (CRLF) files.
+    let line_ending = detect_line_ending(text);
+    let formatted_text = normalize_line_endings(&formatted_lines.join("\n"), line_ending);
     let original_text = text.to_string();
 
     if formatted_text != original_text {
@@ -271,6 +312,16 @@ pub(crate) fn format_twee_text_with_zones(
     // Trim trailing whitespace from the final output.
     let formatted = formatted.trim_end().to_string();
     let original = text.trim_end();
+
+    // Detect the document's line ending style and convert the formatted
+    // output to match. The formatter internally normalizes `\r\n` → `\n`,
+    // so without this conversion, Windows (CRLF) files would always appear
+    // "changed" (CRLF vs LF), causing the formatter to return edits even
+    // on already-formatted documents. Those edits would shift byte offsets
+    // and corrupt semantic token colors for passage headers.
+    let line_ending = detect_line_ending(text);
+    let formatted = normalize_line_endings(&formatted, line_ending);
+    let original = normalize_line_endings(original, line_ending);
 
     if formatted != original {
         // Use `full_document_range` to ensure the range covers the trailing

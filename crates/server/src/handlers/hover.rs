@@ -919,10 +919,9 @@ fn check_container_violation(
     // Determine the allowed parent set.
     let allowed: Vec<&str> = if let Some(parent) = mdef.container {
         vec![parent]
-    } else if let Some(parents) = mdef.container_any_of {
-        parents.to_vec()
     } else {
-        return None; // No container constraint.
+        let parents = mdef.container_any_of?; // No container constraint.
+        parents.to_vec()
     };
 
     // Convert document-absolute byte_offset to passage-relative for the
@@ -1721,6 +1720,7 @@ fn try_operator_hover(
 ///    re-parse).
 /// 3. It's consistent with `try_operator_hover` and `try_global_hover`,
 ///    which also use line-based scanning for simple patterns.
+///
 /// Build hover text for a markup kind from the zone map.
 ///
 /// `marker_text` is the source text of the markup leaf (used to determine
@@ -1734,7 +1734,7 @@ fn build_markup_hover_text(
     use knot_core::zoning::MarkupKind;
     match kind {
         MarkupKind::Heading => {
-            let level = marker_text.chars().take_while(|c| *c == '!').count().min(6).max(1);
+            let level = marker_text.chars().take_while(|c| *c == '!').count().clamp(1, 6);
             let html_tag = match level {
                 1 => "h1",
                 2 => "h2",
@@ -3737,7 +3737,7 @@ mod phase6_zone_hover_tests {
     }
 
     /// Helper: find the passage containing a document-absolute byte offset.
-    fn passage_at<'a>(doc: &'a knot_core::Document, offset: usize) -> Option<&'a knot_core::Passage> {
+    fn passage_at(doc: &knot_core::Document, offset: usize) -> Option<&knot_core::Passage> {
         doc.passages.iter().find(|p| p.contains_abs_offset(offset))
     }
 

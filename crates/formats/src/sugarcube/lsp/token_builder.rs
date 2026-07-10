@@ -427,7 +427,6 @@ fn build_semantic_tokens_at_depth(
                 display_span,
                 target_span,
                 setter_span,
-                span: _,
                 ..
             } => {
                 // Emit per-region semantic tokens for `[[...]]` links:

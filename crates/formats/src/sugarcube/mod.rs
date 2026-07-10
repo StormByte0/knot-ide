@@ -97,6 +97,14 @@ use ast::ParseMode;
 use classifier::{ClassifiedPassage, is_script_passage, is_stylesheet_passage, is_widget_passage};
 use registries::SugarCubeRegistry;
 
+/// A zero-based cursor position (line, character) in a document, used by
+/// completion handlers to build LSP `textEdit` ranges.
+#[derive(Clone, Copy, Debug)]
+struct CursorPos {
+    line: u32,
+    character: u32,
+}
+
 // ===========================================================================
 // Completion context helpers (SugarCube-specific)
 // ===========================================================================
@@ -1562,8 +1570,7 @@ impl FormatPlugin for SugarCubePlugin {
                     workspace,
                     uri,
                     "",
-                    line,
-                    character,
+                    CursorPos { line, character },
                     text,
                     byte_offset,
                 );
@@ -1579,8 +1586,7 @@ impl FormatPlugin for SugarCubePlugin {
                         workspace,
                         uri,
                         after,
-                        line,
-                        character,
+                        CursorPos { line, character },
                         text,
                         byte_offset,
                     );
@@ -1890,8 +1896,7 @@ impl FormatPlugin for SugarCubePlugin {
                     workspace,
                     uri,
                     name,
-                    line,
-                    character,
+                    CursorPos { line, character },
                     text,
                     byte_offset,
                 );
@@ -2260,8 +2265,7 @@ enum PassageCompletionKind {
 /// textEdit range so it gets replaced.
 fn compute_macro_text_edit(
     filter_prefix: &str,
-    line: u32,
-    character: u32,
+    cursor: CursorPos,
     snippet: &str,
     after_cursor: &str,
 ) -> Option<crate::types::FormatTextEdit> {
@@ -2285,22 +2289,22 @@ fn compute_macro_text_edit(
     if !filter_prefix.is_empty() {
         // User typed `<<li` — replace just the partial name `li`
         let prefix_len = filter_prefix.chars().count() as u32;
-        let start_char = character.saturating_sub(prefix_len);
-        let end_char = character + auto_close_len;
+        let start_char = cursor.character.saturating_sub(prefix_len);
+        let end_char = cursor.character + auto_close_len;
         Some(FormatTextEdit {
-            start_line: line,
+            start_line: cursor.line,
             start_character: start_char,
-            end_line: line,
+            end_line: cursor.line,
             end_character: end_char,
             new_text,
         })
     } else {
         // User typed `<<` — insert snippet at cursor (possibly replacing auto-close `>>`)
         Some(FormatTextEdit {
-            start_line: line,
-            start_character: character,
-            end_line: line,
-            end_character: character + auto_close_len,
+            start_line: cursor.line,
+            start_character: cursor.character,
+            end_line: cursor.line,
+            end_character: cursor.character + auto_close_len,
             new_text,
         })
     }
@@ -2500,8 +2504,7 @@ impl SugarCubePlugin {
         workspace: &knot_core::Workspace,
         uri: &url::Url,
         filter_prefix: &str,
-        line: u32,
-        character: u32,
+        cursor: CursorPos,
         text: &str,
         byte_offset: usize,
     ) -> Vec<crate::types::FormatCompletionItem> {
@@ -2630,8 +2633,7 @@ impl SugarCubePlugin {
                     let snippet = macros::convert_snippet_newlines(form.snippet);
                     let text_edit = compute_macro_text_edit(
                         filter_prefix,
-                        line,
-                        character,
+                        cursor,
                         &snippet,
                         after_cursor,
                     );
@@ -2663,7 +2665,7 @@ impl SugarCubePlugin {
                 // Single-form macro: use the existing snippet system
                 let snippet = self.build_macro_snippet(mdef.name, mdef.body);
                 let text_edit =
-                    compute_macro_text_edit(filter_prefix, line, character, &snippet, after_cursor);
+                    compute_macro_text_edit(filter_prefix, cursor, &snippet, after_cursor);
                 let detail_text = if mdef.deprecated {
                     format!("[Deprecated] [{}] {}", category, mdef.description)
                 } else {
@@ -2720,8 +2722,7 @@ impl SugarCubePlugin {
                 ));
                 let block_text_edit = compute_macro_text_edit(
                     filter_prefix,
-                    line,
-                    character,
+                    cursor,
                     &block_snippet,
                     after_cursor,
                 );
@@ -2752,8 +2753,7 @@ impl SugarCubePlugin {
                 ));
                 let block_text_edit = compute_macro_text_edit(
                     filter_prefix,
-                    line,
-                    character,
+                    cursor,
                     &block_snippet,
                     after_cursor,
                 );
@@ -2801,8 +2801,7 @@ impl SugarCubePlugin {
                 };
                 let inline_text_edit = compute_macro_text_edit(
                     filter_prefix,
-                    line,
-                    character,
+                    cursor,
                     &inline_snippet,
                     after_cursor,
                 );
@@ -2846,7 +2845,7 @@ impl SugarCubePlugin {
                     format!("{} {}>>", name, arg_placeholder)
                 };
                 let text_edit =
-                    compute_macro_text_edit(filter_prefix, line, character, &snippet, after_cursor);
+                    compute_macro_text_edit(filter_prefix, cursor, &snippet, after_cursor);
                 let full_detail = if let Some(desc) = description {
                     format!("{} — {}", detail_base, desc)
                 } else {
@@ -3590,7 +3589,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", 0, 2, text, 2);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 0, character: 2 }, text, 2);
         assert!(
             !items.is_empty(),
             "build_macro_completions returned {} items, expected > 0",
@@ -4960,7 +4959,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
         let inline = items
             .iter()
             .find(|i| i.insert_text.as_deref() == Some("mywidget ${1:arg1} ${2:arg2}>>"))
@@ -4982,7 +4981,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
         // Find the inline form (label is `<<mywidget>>` without `...<</mywidget>>`)
         let inline = items
             .iter()
@@ -5010,7 +5009,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
         let inline = items
             .iter()
             .find(|i| i.label == "<<nowidget>>" && !i.label.contains("</"))
@@ -5033,7 +5032,7 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", 1, 4, text, 4);
+        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
         let item = items
             .iter()
             .find(|i| i.label == "<<mymacro>>")
@@ -6131,7 +6130,7 @@ mod phase4_zone_completion_tests {
         text: &str,
         byte_offset: usize,
     ) -> Vec<String> {
-        let items = plugin.build_macro_completions(workspace, uri, "", 0, 0, text, byte_offset);
+        let items = plugin.build_macro_completions(workspace, uri, "", CursorPos { line: 0, character: 0 }, text, byte_offset);
         items.iter().map(|i| i.label.clone()).collect()
     }
 

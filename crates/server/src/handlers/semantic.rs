@@ -3,7 +3,6 @@
 
 use crate::handlers::helpers;
 use crate::state::ServerState;
-use knot_core::AnalysisEngine;
 use knot_formats::plugin as fmt_plugin;
 use lsp_types::*;
 
@@ -596,111 +595,16 @@ pub(crate) async fn code_lens(
 }
 
 pub(crate) async fn inlay_hint(
-    state: &ServerState,
-    params: InlayHintParams,
+    _state: &ServerState,
+    _params: InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>, tower_lsp::jsonrpc::Error> {
-    // Short-circuit if the server is shutting down — the dataflow analysis
-    // below is the single most expensive handler; if the stream is about to
-    // be destroyed, there is no point running it.
-    if state
-        .shutting_down
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        return Ok(None);
-    }
-
-    let uri = helpers::normalize_file_uri(&params.text_document.uri);
-    let inner = state.inner.read().await;
-
-    let Some(text) = inner.open_documents.get(&uri) else {
-        return Ok(None);
-    };
-
-    let start_passage = inner
-        .workspace
-        .metadata
-        .as_ref()
-        .map(|m| m.start_passage.as_str())
-        .unwrap_or("Start");
-
-    let passage_data = AnalysisEngine::collect_passage_data(&inner.workspace);
-    let core_seed =
-        AnalysisEngine::collect_special_passage_initializers(&inner.workspace, &passage_data);
-    let format = inner.workspace.resolve_format();
-    let seed_init = helpers::supplement_seed_with_format_specials(
-        core_seed,
-        &inner.workspace,
-        &inner.format_registry,
-        format,
-    );
-    let flow_states = AnalysisEngine::run_dataflow_from_engine(
-        &inner.workspace,
-        start_passage,
-        &passage_data,
-        &seed_init,
-    );
-
-    let mut hints = Vec::new();
-
-    // Use workspace passage data for span-based resolution.
-    let Some(doc) = inner.workspace.get_document(&uri) else {
-        return Ok(None);
-    };
-
-    for passage in &doc.passages {
-        if let Some(state) = flow_states.get(&passage.name) {
-            // ── "initialized" hint ─────────────────────────────────────
-            //
-            // Shows which variables are available at passage entry. Truncated
-            // to 5 names to avoid overwhelming the header line. Compact format:
-            // `// init: $a, $b, $c, …`
-            let mut init_vars: Vec<&String> = state.entry.iter().collect();
-            init_vars.sort();
-
-            if !init_vars.is_empty() {
-                let display_count = init_vars.len().min(5);
-                let names: Vec<&str> = init_vars[..display_count]
-                    .iter()
-                    .map(|v| v.as_str())
-                    .collect();
-                let suffix = if init_vars.len() > 5 {
-                    format!(", … +{}", init_vars.len() - 5)
-                } else {
-                    String::new()
-                };
-                let label = format!("// init: {}{}", names.join(", "), suffix);
-                // Position the hint at the start of the passage header
-                let position = helpers::byte_offset_to_position(
-                    text,
-                    passage.abs_offset(passage.span.start).min(text.len()),
-                );
-                hints.push(InlayHint {
-                    position,
-                    label: InlayHintLabel::String(label),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: Some(true),
-                    padding_right: Some(true),
-                    data: None,
-                });
-            }
-
-            // Note: "uninitialized variable" inlay hints were removed.
-            // SugarCube variables are persistent (stored in State.variables
-            // for the entire session). The simplistic per-passage flow
-            // analysis produced false positives for any variable set in
-            // StoryInit or an earlier passage. The format plugin's own
-            // `compute_variable_diagnostics()` handles this correctly via
-            // the state variable registry + graph BFS — no ghost text needed.
-        }
-    }
-
-    if hints.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(hints))
-    }
+    // Inlay hints at passage headers were removed. They shifted the passage
+    // header line to the right (inlay hints are inherently inline — there's
+    // no way to render them on their own line above the header). The passage
+    // header (`:: Name [tags]`) is structurally important and must not be
+    // shifted. Variable initialization info is available via the Debug View
+    // panel and the `knot/passageDiagnostics` request instead.
+    Ok(None)
 }
 
 // ===========================================================================

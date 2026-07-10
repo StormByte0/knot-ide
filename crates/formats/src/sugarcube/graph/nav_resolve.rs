@@ -70,10 +70,9 @@ pub fn extract_set_string_literal(args: &str) -> Option<(String, String)> {
     let rest = trimmed[var_end..].trim();
     let after_assign = if let Some(after_to) = rest.strip_prefix("to") {
         after_to.trim()
-    } else if let Some(after_eq) = rest.strip_prefix("=") {
-        after_eq.trim()
     } else {
-        return None;
+        let after_eq = rest.strip_prefix("=")?;
+        after_eq.trim()
     };
 
     // Extract string literal

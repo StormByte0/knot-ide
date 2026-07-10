@@ -639,6 +639,7 @@ pub(crate) fn find_variable_read_locations(
 /// in special passages that the core dataflow doesn't track as "persistent
 /// inits"). This function closes that gap by querying the format plugin's
 /// `special_passage_seed_variables()` and merging the results into the seed set.
+#[allow(dead_code)]
 pub(crate) fn supplement_seed_with_format_specials(
     mut core_seed: knot_core::analysis::InitSet,
     workspace: &Workspace,

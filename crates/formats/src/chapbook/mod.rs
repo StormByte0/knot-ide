@@ -685,11 +685,7 @@ impl ChapbookPlugin {
                         modifier: None,
                     });
                 }
-                TemplateSegment::Modify {
-                    start,
-                    content_start: _,
-                    ..
-                } => {
+                TemplateSegment::Modify { start, .. } => {
                     // Macro token for the [modify] block
                     tokens.push(SemanticToken {
                         start: body_offset + *start,

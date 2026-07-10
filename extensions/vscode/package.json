@@ -1269,7 +1269,7 @@
         "editor.acceptSuggestionOnEnter": "on",
         "editor.tabSize": 4,
         "editor.insertSpaces": true,
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": false,
         "editor.bracketPairColorization.enabled": true
       },
       "[twee-sugarcube]": {
@@ -1285,7 +1285,7 @@
         "editor.acceptSuggestionOnEnter": "on",
         "editor.tabSize": 4,
         "editor.insertSpaces": true,
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": false,
         "editor.bracketPairColorization.enabled": true
       },
       "[twee-harlowe]": {
@@ -1301,7 +1301,7 @@
         "editor.acceptSuggestionOnEnter": "on",
         "editor.tabSize": 4,
         "editor.insertSpaces": true,
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": false,
         "editor.bracketPairColorization.enabled": true
       },
       "[twee-chapbook]": {
@@ -1317,7 +1317,7 @@
         "editor.acceptSuggestionOnEnter": "on",
         "editor.tabSize": 4,
         "editor.insertSpaces": true,
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": false,
         "editor.bracketPairColorization.enabled": true
       },
       "[twee-snowman]": {
@@ -1333,7 +1333,7 @@
         "editor.acceptSuggestionOnEnter": "on",
         "editor.tabSize": 4,
         "editor.insertSpaces": true,
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": false,
         "editor.bracketPairColorization.enabled": true
       }
     }

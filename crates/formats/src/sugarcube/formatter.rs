@@ -203,8 +203,6 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
             &mut out,
             text,
             &leaf.kind,
-            leaf,
-            zones,
             current_depth,
             &mut at_line_start,
             force_inline,
@@ -442,8 +440,6 @@ fn emit_leaf(
     out: &mut String,
     text: &str,
     kind: &LeafKind,
-    leaf: &LeafZone,
-    zones: &ZoneMap,
     depth: u32,
     at_line_start: &mut bool,
     force_inline: bool,
@@ -493,11 +489,6 @@ fn emit_leaf(
             emit_text(out, text, depth, at_line_start);
         }
     }
-
-    // Suppress unused-variable warnings for fields we don't currently use
-    // but keep them in scope for future refinements.
-    let _ = leaf;
-    let _ = zones;
 }
 
 /// Emit markup text with SugarCube-specific normalization.
@@ -624,12 +615,25 @@ fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool)
         return;
     }
 
+    // Normalize \r\n → \n (and lone \r → \n) so all newline handling below
+    // only deals with \n. This follows the same CRLF-awareness pattern used
+    // throughout the codebase (see twine_core.rs, snowman/mod.rs,
+    // chapbook/mod.rs, sugarcube/lexer.rs). Without this, \r characters
+    // survive the leading-newline trim and blank-line detection on Windows
+    // (CRLF) files, producing extra tab-only lines inside macro bodies.
+    let owned_normalized;
+    let mut text = if text.contains('\r') {
+        owned_normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        owned_normalized.as_str()
+    } else {
+        text
+    };
+
     // Trim leading newlines if we're already at a line start.
     // - Inside macro bodies (depth > 0): trim ALL leading newlines — no blank
     //   lines between open tag and content.
     // - At top level (depth == 0): trim all but one newline — preserve ONE
     //   blank line between top-level elements (visual separation).
-    let mut text = text;
     if *at_line_start {
         if depth > 0 {
             // Inside a macro body: remove ALL leading newlines.
@@ -717,10 +721,7 @@ fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool)
 
         last_was_blank = false;
 
-        if first && *at_line_start {
-            out.push_str(&indent);
-            out.push_str(normalized);
-        } else if !first {
+        if !first || *at_line_start {
             out.push_str(&indent);
             out.push_str(normalized);
         } else {
