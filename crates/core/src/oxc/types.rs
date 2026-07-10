@@ -107,7 +107,10 @@ impl JsParseOutcome {
     /// `parse_js` and `parse_and_visit` in `parser.rs`. Format plugins
     /// consume `JsParseOutcome` but never construct one directly.
     pub(crate) fn new(diagnostics: Vec<JsDiagnostic>, panicked: bool) -> Self {
-        Self { diagnostics, panicked }
+        Self {
+            diagnostics,
+            panicked,
+        }
     }
 
     /// Returns `true` if parsing had no errors at all.

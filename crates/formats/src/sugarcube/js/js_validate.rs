@@ -290,9 +290,7 @@ mod tests {
         let mut ast = parser::parse_passage_body(body, 0, ParseMode::Normal);
         let empty_set = std::collections::HashSet::new();
         crate::sugarcube::js::js_annotate::annotate_js(
-            &mut ast,
-            body,
-            false, // not a script passage
+            &mut ast, body, false, // not a script passage
             true,  // SugarCube syntax
             &empty_set,
         );

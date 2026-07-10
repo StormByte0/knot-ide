@@ -238,11 +238,7 @@ fn collect_var_ops_from_nodes(
                 for vr in var_refs {
                     let segment_spans =
                         compute_target_segment_spans(&vr.name, &vr.property_path, &vr.span);
-                    let origin = compute_text_origin(
-                        zones,
-                        vr.span.start,
-                        body_offset_in_passage,
-                    );
+                    let origin = compute_text_origin(zones, vr.span.start, body_offset_in_passage);
 
                     result.push((
                         AnalyzedVarOp {
@@ -610,7 +606,6 @@ fn is_raw_body_macro(name: &str) -> bool {
     find_macro(name).is_some_and(|d| d.body_is_raw)
 }
 
-
 /// Determine SugarCube semantic overrides for a variable operation within
 /// a macro context.
 fn determine_macro_override(
@@ -866,77 +861,73 @@ pub fn walk_script_js(
 ) {
     use crate::sugarcube::js::js_preprocess;
     use crate::sugarcube::js::js_walk;
-    use knot_core::oxc::{parse_and_visit, ParseMode as JsParseMode};
+    use knot_core::oxc::{ParseMode as JsParseMode, parse_and_visit};
 
     let preprocessed = js_preprocess::preprocess_for_oxc(body_text, true);
 
     // oxc has error recovery — walk whatever AST we can get, even if there
     // are syntax errors. The valid parts still contribute to the registries.
-    let (_outcome, _) = parse_and_visit(
-        &preprocessed.source,
-        JsParseMode::Module,
-        |program| {
-            let analysis = js_walk::walk_script_passage(program, &preprocessed);
+    let (_outcome, _) = parse_and_visit(&preprocessed.source, JsParseMode::Module, |program| {
+        let analysis = js_walk::walk_script_passage(program, &preprocessed);
 
-            // Record variable operations. `walk_script_js` handles script
-            // passages — all var ops here originate from raw JS, so their
-            // `VarOrigin` is `RawScript` (Phase 9).
-            let vtree = registry.variables_mut();
-            for op in &analysis.var_ops {
-                vtree.record_var_with_origin(
-                    &op.name,
-                    op.is_temporary,
-                    op.access_kind,
-                    &cp.header.name,
-                    file_uri,
-                    op.span.clone(),
-                    &op.property_path,
-                    body_text,
-                    &op.segment_spans,
-                    op.construct_span.clone(),
-                    &op.segment_construct_spans,
-                    VarOrigin::RawScript,
-                );
-            }
+        // Record variable operations. `walk_script_js` handles script
+        // passages — all var ops here originate from raw JS, so their
+        // `VarOrigin` is `RawScript` (Phase 9).
+        let vtree = registry.variables_mut();
+        for op in &analysis.var_ops {
+            vtree.record_var_with_origin(
+                &op.name,
+                op.is_temporary,
+                op.access_kind,
+                &cp.header.name,
+                file_uri,
+                op.span.clone(),
+                &op.property_path,
+                body_text,
+                &op.segment_spans,
+                op.construct_span.clone(),
+                &op.segment_construct_spans,
+                VarOrigin::RawScript,
+            );
+        }
 
-            // Record definitions
-            let (macro_reg, func_reg, template_reg) = registry.definition_registries_mut();
-            for macro_add in &analysis.macro_adds {
-                macro_reg.register_macro_add(
-                    &macro_add.name,
-                    &cp.header.name,
-                    file_uri,
-                    macro_add.name_offset,
-                    None,
-                    macro_add.body,
-                );
-            }
-            for template_add in &analysis.template_adds {
-                let kind = if template_add.is_string {
-                    TemplateKind::String
-                } else {
-                    TemplateKind::Function
-                };
-                template_reg.register_template(
-                    &template_add.name,
-                    kind,
-                    &cp.header.name,
-                    file_uri,
-                    template_add.name_offset,
-                );
-            }
-            for func_def in &analysis.function_defs {
-                func_reg.register_function(
-                    &func_def.name,
-                    FunctionKind::Declaration,
-                    &cp.header.name,
-                    file_uri,
-                    func_def.name_offset,
-                    func_def.param_count,
-                );
-            }
-        },
-    );
+        // Record definitions
+        let (macro_reg, func_reg, template_reg) = registry.definition_registries_mut();
+        for macro_add in &analysis.macro_adds {
+            macro_reg.register_macro_add(
+                &macro_add.name,
+                &cp.header.name,
+                file_uri,
+                macro_add.name_offset,
+                None,
+                macro_add.body,
+            );
+        }
+        for template_add in &analysis.template_adds {
+            let kind = if template_add.is_string {
+                TemplateKind::String
+            } else {
+                TemplateKind::Function
+            };
+            template_reg.register_template(
+                &template_add.name,
+                kind,
+                &cp.header.name,
+                file_uri,
+                template_add.name_offset,
+            );
+        }
+        for func_def in &analysis.function_defs {
+            func_reg.register_function(
+                &func_def.name,
+                FunctionKind::Declaration,
+                &cp.header.name,
+                file_uri,
+                func_def.name_offset,
+                func_def.param_count,
+            );
+        }
+    });
 }
 
 /// Detect whether the `container` keyword appears in widget args.
@@ -1222,9 +1213,9 @@ mod tests {
     // for JS analysis, then call `populate_registries_from_unified_ast` and
     // inspect the resulting `VarAccess` records.
 
-    use crate::sugarcube::classifier::{PassageCategory};
-    use crate::sugarcube::registries::CustomMacroRegistry;
     use crate::header::TweeHeader;
+    use crate::sugarcube::classifier::PassageCategory;
+    use crate::sugarcube::registries::CustomMacroRegistry;
     use crate::zoning::build_from_ast as build_zones;
 
     /// Build a minimal `ClassifiedPassage` for testing.
@@ -1274,7 +1265,10 @@ mod tests {
     /// registry's variable tree. Uses `get_variable` to find the root node,
     /// then collects all accesses from its `meta.refs` (includes both direct
     /// and propagated accesses).
-    fn collect_accesses(registry: &SugarCubeRegistry, var_name: &str) -> Vec<super::super::variable_tree::VarAccess> {
+    fn collect_accesses(
+        registry: &SugarCubeRegistry,
+        var_name: &str,
+    ) -> Vec<super::super::variable_tree::VarAccess> {
         let vtree = registry.variables();
         let mut accesses = Vec::new();
         if let Some((_, node)) = vtree.get_variable(var_name) {
@@ -1341,7 +1335,10 @@ mod tests {
         );
         for a in &accesses {
             match &a.origin {
-                super::super::variable_tree::VarOrigin::MacroBody { enclosing_macro, depth } => {
+                super::super::variable_tree::VarOrigin::MacroBody {
+                    enclosing_macro,
+                    depth,
+                } => {
                     assert_eq!(
                         enclosing_macro, "link",
                         "$gold in <<link>> body should have enclosing_macro \"link\", got {:?}",
@@ -1374,7 +1371,10 @@ mod tests {
         );
         for a in &gold_accesses {
             match &a.origin {
-                super::super::variable_tree::VarOrigin::MacroBody { enclosing_macro, depth } => {
+                super::super::variable_tree::VarOrigin::MacroBody {
+                    enclosing_macro,
+                    depth,
+                } => {
                     assert_eq!(
                         enclosing_macro, "if",
                         "$gold inside <<link>><<if>> should have enclosing_macro \"if\" (innermost), got {:?}",

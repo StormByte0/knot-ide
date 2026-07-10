@@ -360,37 +360,34 @@ fn signature_help_inner(
                     part,
                     ..
                 } = &leaf.kind
-                    && matches!(
-                        part,
-                        knot_core::zoning::TagPart::Open
-                            | knot_core::zoning::TagPart::Expression
-                    ) {
-                        // The leaf's span is the open tag (passage-relative).
-                        // Convert to line-relative for comma counting.
-                        let open_abs = passage.abs_offset(leaf.span.start);
-                        let open_line = helpers::byte_offset_to_position(text, open_abs).line;
-                        if open_line == position.line {
-                            // Cursor is on the open tag's line — count commas
-                            // after the name to determine active parameter.
-                            let line_start = helpers::position_to_byte_offset(
-                                text,
-                                Position {
-                                    line: position.line,
-                                    character: 0,
-                                },
-                            );
-                            let name_end_in_line =
-                                open_abs + name.len() - line_start.min(open_abs + name.len());
-                            let after_name =
-                                &line_text[name_end_in_line.min(line_text.len())..];
-                            let active_param = after_name.matches(',').count() as u32;
-                            if let Some(help) =
-                                build_signature_help(plugin, name, active_param)
-                            {
-                                return Some(help);
-                            }
-                        }
+                && matches!(
+                    part,
+                    knot_core::zoning::TagPart::Open | knot_core::zoning::TagPart::Expression
+                )
+            {
+                // The leaf's span is the open tag (passage-relative).
+                // Convert to line-relative for comma counting.
+                let open_abs = passage.abs_offset(leaf.span.start);
+                let open_line = helpers::byte_offset_to_position(text, open_abs).line;
+                if open_line == position.line {
+                    // Cursor is on the open tag's line — count commas
+                    // after the name to determine active parameter.
+                    let line_start = helpers::position_to_byte_offset(
+                        text,
+                        Position {
+                            line: position.line,
+                            character: 0,
+                        },
+                    );
+                    let name_end_in_line =
+                        open_abs + name.len() - line_start.min(open_abs + name.len());
+                    let after_name = &line_text[name_end_in_line.min(line_text.len())..];
+                    let active_param = after_name.matches(',').count() as u32;
+                    if let Some(help) = build_signature_help(plugin, name, active_param) {
+                        return Some(help);
                     }
+                }
+            }
 
             // Case 2: cursor is inside a macro body — walk up the stack.
             let stack = passage.zones.body_stack_at(passage_offset);
@@ -398,9 +395,7 @@ fn signature_help_inner(
                 // The cursor is inside a block macro's body. Show signature
                 // for the innermost enclosing macro. We can't count commas
                 // (the cursor isn't in the args), so active_param = 0.
-                if let Some(help) =
-                    build_signature_help(plugin, &enclosing.macro_name, 0)
-                {
+                if let Some(help) = build_signature_help(plugin, &enclosing.macro_name, 0) {
                     return Some(help);
                 }
             }
@@ -421,12 +416,7 @@ fn signature_help_inner(
     }
 
     // Try custom macro / widget.
-    build_custom_macro_signature_help(
-        plugin,
-        &macro_info.name,
-        line_text,
-        &macro_info.name_range,
-    )
+    build_custom_macro_signature_help(plugin, &macro_info.name, line_text, &macro_info.name_range)
 }
 
 /// Build signature help for a builtin macro.
@@ -582,7 +572,10 @@ mod signature_help_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
+                m.insert(
+                    uri.clone(),
+                    crate::handlers::helpers::token_groups_to_map(parse_result.token_groups),
+                );
                 m
             },
             installed_formats: Vec::new(),
@@ -837,7 +830,10 @@ mod folding_range_tests {
             .iter()
             .find(|r| r.end_line > r.start_line)
             .expect("should have a multi-line folding range");
-        assert_eq!(if_range.start_line, 1, "fold should start at line 1 (<<if>>)");
+        assert_eq!(
+            if_range.start_line, 1,
+            "fold should start at line 1 (<<if>>)"
+        );
         assert_eq!(if_range.end_line, 4, "fold should end at line 4 (<</if>>)");
     }
 

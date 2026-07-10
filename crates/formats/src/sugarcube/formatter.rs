@@ -43,7 +43,7 @@
 
 use std::ops::Range;
 
-use knot_core::zoning::{LeafKind, LeafZone, TagPart, ZoneMap};
+use knot_core::zoning::{LeafKind, LeafZone, ZoneMap};
 
 /// The indentation unit: one tab per depth level.
 const INDENT_UNIT: &str = "\t";
@@ -78,18 +78,10 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
         }
     }
 
-    // Collect leaves into a Vec for lookahead. We need to detect empty-body
-    // macros (open tag immediately followed by its matching close tag with no
-    // content between them) so we can keep them inline instead of putting the
-    // close tag on a new indented line.
     let leaves: Vec<&LeafZone> = zones.iter_leaves().collect();
 
     let mut out = String::with_capacity(body_text.len() + 256);
     let mut at_line_start = true;
-    // When true, skip whitespace-only leaves until we hit the matching close
-    // tag. Set after emitting a forced-inline open tag to suppress the
-    // newline/whitespace between `<<link>>` and `<</link>>`.
-    let mut skipping_whitespace_for_empty_body: Option<String> = None;
     // When true, the next Prose leaf should have its leading spaces stripped
     // (because a markup marker leaf just emitted a single space separator).
     let mut strip_next_prose_leading_spaces = false;
@@ -108,24 +100,10 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
         // at the parent's indentation per the formatter spec.
         //
         // For leaves at the top level (body_idx=None), depth is 0.
-        //
-        // Example: `<<if $x>>\nhello\n<<else>>\nno\n<</if>>` at top level:
-        // - `<<if $x>>` open tag: body_idx=None → depth 0 ✓
-        // - `hello` prose: body_idx=Some(0), bodies[0].depth=0 → depth 1 ✓
-        // - `<<else>>` SubMacro: body_idx=Some(0), but it's a SubMacro → depth 0 (parent's level) ✓
-        // - `no` prose: body_idx=Some(0), bodies[0].depth=0 → depth 1 ✓
-        // - `<</if>>` close tag: body_idx=None → depth 0 ✓
         let current_depth: u32 = match leaf.body_idx {
             None => 0,
             Some(idx) => {
-                // Compute the effective depth by walking up the parent chain.
-                // If this body is spurious (unknown/inline macro), the content
-                // should be indented at the NEAREST REAL parent's depth, not 0.
                 let effective = zones.effective_depth(idx);
-
-                // SubMacros with `body: Never` (like <<else>>, <<break>>,
-                // <<continue>>) are structural markers that go at the parent
-                // body's depth (not +1). They don't open their own body.
                 let is_never_submacro = matches!(
                     &leaf.kind,
                     LeafKind::MacroTag {
@@ -147,7 +125,8 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
         // If the previous leaf was a markup marker that inserted a space,
         // strip leading spaces from this Prose leaf so we get exactly one
         // space between the marker and the content.
-        let text = if strip_next_prose_leading_spaces && matches!(leaf.kind, LeafKind::Prose { .. }) {
+        let text = if strip_next_prose_leading_spaces && matches!(leaf.kind, LeafKind::Prose { .. })
+        {
             strip_next_prose_leading_spaces = false;
             raw_text.trim_start_matches(' ')
         } else {
@@ -155,66 +134,13 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
             raw_text
         };
 
-        // Detect empty-body macros: if this is an open tag for a block macro
-        // and the next non-whitespace leaf is its matching close tag (no
-        // content between them), keep BOTH the open and close tags inline.
-        // This avoids unnecessary newlines between `<<link>><</link>>`.
-        //
-        // For open tags: scan forward to see if the body is empty.
-        // For close tags: check if the previous leaf was the matching open
-        // tag (which was already flagged as force_inline).
-        let force_inline = is_empty_body_open(leaf, &leaves, i, body_text)
-            || is_matching_close_of_empty_body(leaf, &leaves, i, body_text);
-
-        // If we're skipping whitespace (inside an empty body) and this leaf
-        // is the matching close tag, stop skipping and emit the close tag.
-        // If it's a whitespace-only Prose/Markup leaf, skip it entirely.
-        if let Some(ref open_name) = skipping_whitespace_for_empty_body {
-            if let LeafKind::MacroTag {
-                part: TagPart::Close,
-                macro_name,
-                ..
-            } = &leaf.kind
-            {
-                if macro_name == open_name {
-                    // This is the matching close tag — stop skipping, emit it.
-                    skipping_whitespace_for_empty_body = None;
-                }
-            } else {
-                // Not a close tag. If it's a whitespace-only Prose/Markup
-                // leaf, skip it. Otherwise, stop skipping (shouldn't happen
-                // — is_empty_body_open already verified no content).
-                let is_ws_only = matches!(&leaf.kind, LeafKind::Prose { .. } | LeafKind::Markup(_))
-                    && text.chars().all(|c| c == '\t' || c == ' ' || c == '\n' || c == '\r');
-                if is_ws_only {
-                    continue;
-                }
-                // Non-whitespace content — stop skipping (defensive).
-                skipping_whitespace_for_empty_body = None;
-            }
-        }
-
-        // After emitting a forced-inline open tag, start skipping whitespace
-        // until we hit the matching close tag.
-        let was_force_inline_open = force_inline
-            && matches!(&leaf.kind, LeafKind::MacroTag { part: TagPart::Open, .. });
-
         emit_leaf(
             &mut out,
             text,
             &leaf.kind,
             current_depth,
             &mut at_line_start,
-            force_inline,
         );
-
-        // After emitting a forced-inline open tag, start skipping whitespace
-        // leaves until we hit the matching close tag. This collapses
-        // `<<link>>\n<</link>>` to `<<link>><</link>>`.
-        if was_force_inline_open
-            && let LeafKind::MacroTag { macro_name, .. } = &leaf.kind {
-                skipping_whitespace_for_empty_body = Some(macro_name.clone());
-            }
 
         // Zone-specific: after emitting a markup marker leaf (Heading, ListItem,
         // Blockquote), normalize the space between the marker and the following
@@ -227,30 +153,19 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
                 knot_core::zoning::MarkupKind::Heading
                     | knot_core::zoning::MarkupKind::ListItem
                     | knot_core::zoning::MarkupKind::Blockquote
-            ) {
-                // Peek at the next leaf. If it's Prose, we need to ensure exactly
-                // one space between the marker and the content. The Prose leaf
-                // may start with 0, 1, or more spaces — we normalize to exactly 1.
-                // We do this by pushing a space now and setting a flag that tells
-                // the next emit_text to strip leading spaces.
-                if let Some(next) = leaves.get(i + 1)
-                    && matches!(next.kind, LeafKind::Prose { .. }) {
-                        let next_text = slice_span(body_text, &next.span);
-                        // Only insert a space if the prose doesn't start with a newline
-                        // (newlines mean the content is on the next line, no space needed).
-                        if !next_text.starts_with('\n') && !next_text.is_empty() {
-                            out.push(' ');
-                            // Mark that the next Prose leaf should have leading
-                            // spaces stripped (handled in the next iteration).
-                            strip_next_prose_leading_spaces = true;
-                        }
-                    }
+            )
+            && let Some(next) = leaves.get(i + 1)
+            && matches!(next.kind, LeafKind::Prose { .. })
+        {
+            let next_text = slice_span(body_text, &next.span);
+            if !next_text.starts_with('\n') && !next_text.is_empty() {
+                out.push(' ');
+                strip_next_prose_leading_spaces = true;
             }
+        }
     }
 
-    // Trim trailing whitespace from the final output (no trailing newline
-    // artifacts). The formatter preserves internal blank lines but should
-    // not add a trailing one.
+    // Trim trailing whitespace from the final output.
     trim_trailing_newlines(&mut out);
 
     Some(out)
@@ -310,197 +225,70 @@ fn slice_span<'a>(body: &'a str, span: &Range<usize>) -> &'a str {
     &body[start..end]
 }
 
-/// Check if this leaf is an open tag for a block macro whose body is empty
-/// (no non-whitespace content between the open and close tags). When true,
-/// the formatter forces inline emission for both the open and close tags,
-/// avoiding unnecessary newlines and indentation between `<<link>><</link>>`.
-///
-/// This scans forward from the open tag, skipping whitespace-only Prose/Markup
-/// leaves (a bare `\n` between `<<link>>` and `<</link>>` is NOT content — it's
-/// just a newline that should be collapsed). If we find the matching close tag
-/// before any non-whitespace content, the body is empty.
-fn is_empty_body_open(leaf: &LeafZone, leaves: &[&LeafZone], i: usize, body_text: &str) -> bool {
-    // Must be an open tag.
-    let LeafKind::MacroTag {
-        part: TagPart::Open,
-        macro_name: open_name,
-        macro_kind,
-        body_requirement,
-        ..
-    } = &leaf.kind
-    else {
-        return false;
-    };
-
-    // Only block macros qualify (Container or Required/Optional body).
-    // Inline macros (Never body) are already inline — no need to force.
-    use knot_core::types::{BodyRequirement, MacroKind};
-    let is_block = matches!(macro_kind, Some(MacroKind::Container | MacroKind::SubMacro))
-        || matches!(body_requirement, Some(BodyRequirement::Required | BodyRequirement::Optional));
-    if !is_block {
-        return false;
-    }
-
-    // Scan forward through subsequent leaves. Skip whitespace-only Prose/Markup
-    // leaves (a bare newline is whitespace, not content). If we find the
-    // matching close tag before any non-whitespace content, the body is empty.
-    let mut j = i + 1;
-    while let Some(next) = leaves.get(j) {
-        match &next.kind {
-            LeafKind::MacroTag {
-                part: TagPart::Close,
-                macro_name,
-                ..
-            } => {
-                return macro_name == open_name;
-            }
-            LeafKind::Prose { .. } | LeafKind::Markup(_) => {
-                // Check the actual text content. If it's all whitespace
-                // (newlines, tabs, spaces), skip it — it's not real content,
-                // just formatting noise between the tags.
-                let text = slice_span(body_text, &next.span);
-                if text.chars().any(|c| c != '\t' && c != ' ' && c != '\n' && c != '\r') {
-                    // Non-whitespace content found — body is not empty.
-                    return false;
-                }
-                // Whitespace-only — skip and continue scanning.
-                j += 1;
-            }
-            _ => {
-                // Any other leaf kind (Raw, Error, another MacroTag) means
-                // the body has content.
-                return false;
-            }
-        }
-    }
-
-    // Reached the end without finding a close tag — not empty (unclosed).
-    false
-}
-
-/// Check if this leaf is a close tag whose matching open tag is the
-/// preceding leaf (possibly with whitespace-only leaves between them).
-/// When true, the formatter forces inline emission for the close tag,
-/// keeping `<<link>><</link>>` together.
-fn is_matching_close_of_empty_body(
-    leaf: &LeafZone,
-    leaves: &[&LeafZone],
-    i: usize,
-    body_text: &str,
-) -> bool {
-    // Must be a close tag.
-    let LeafKind::MacroTag {
-        part: TagPart::Close,
-        macro_name: close_name,
-        ..
-    } = &leaf.kind
-    else {
-        return false;
-    };
-
-    // Scan backward through preceding leaves. Skip whitespace-only Prose/Markup
-    // leaves. If we find the matching open tag before any non-whitespace
-    // content, this close tag is part of an empty body.
-    let mut j = i;
-    while let Some(prev_idx) = j.checked_sub(1) {
-        j = prev_idx;
-        let Some(prev) = leaves.get(prev_idx) else {
-            return false;
-        };
-        match &prev.kind {
-            LeafKind::MacroTag {
-                part: TagPart::Open,
-                macro_name,
-                ..
-            } => {
-                return macro_name == close_name;
-            }
-            LeafKind::Prose { .. } | LeafKind::Markup(_) => {
-                let text = slice_span(body_text, &prev.span);
-                if text.chars().any(|c| c != '\t' && c != ' ' && c != '\n' && c != '\r') {
-                    // Non-whitespace content — not an empty body.
-                    return false;
-                }
-                // Whitespace-only — skip and continue scanning backward.
-            }
-            _ => {
-                return false;
-            }
-        }
-    }
-
-    false
-}
-
 /// Emit a single leaf's text into the output buffer.
 ///
-/// `force_inline` — when true, block-macro open/close tags are emitted inline
-/// (no newline + indent). Used for empty-body macros like `<<link>><</link>>`.
-fn emit_leaf(
-    out: &mut String,
-    text: &str,
-    kind: &LeafKind,
-    depth: u32,
-    at_line_start: &mut bool,
-    force_inline: bool,
-) {
+/// The formatter is **zone-aware**: it uses the zone classification to decide
+/// what's safe to format. In SugarCube, every `\n` becomes a `<br>` in the
+/// rendered output, so the formatter must NOT add, remove, or collapse
+/// newlines in content that renders to the player.
+///
+/// Zone dispatch:
+/// - **`Prose { is_prose: true }`** + **`Markup(_)`** → renders to player.
+///   Preserves all newlines verbatim. Only normalizes indentation (strip
+///   existing, re-apply canonical), except block markers (`!`, `*`, `#`, `>`,
+///   `|`) which must stay at column 0 for SugarCube to recognize them.
+/// - **`MacroTag`** → structural, doesn't render. Safe to normalize
+///   whitespace inside the tag (`<<set  $x>>` → `<<set $x>>`), indent.
+/// - **`Prose { is_prose: false }`** → inside `<<script>>`/`<<silently>>`.
+///   Treat like code: safe to normalize indentation.
+/// - **`Raw`** → JS/CSS. Emit as-is (defer to language sub-formatter).
+/// - **`Error`** → refused by `format_passage` (returns `None`).
+fn emit_leaf(out: &mut String, text: &str, kind: &LeafKind, depth: u32, at_line_start: &mut bool) {
     match kind {
-        LeafKind::Prose { .. } => {
-            emit_text(out, text, depth, at_line_start);
-        }
-        LeafKind::Markup(markup_kind) => {
-            // Zone-specific formatting: SugarCube markup gets normalized
-            // (e.g., `!heading` → `! heading`, `*item` → `* item`).
-            // Other markup is emitted as prose.
-            emit_markup(out, text, *markup_kind, depth, at_line_start);
-        }
-        LeafKind::MacroTag { part, macro_kind, body_requirement, .. } => {
-            match part {
-                TagPart::Open => {
-                    emit_macro_open(
-                        out,
-                        text,
-                        depth,
-                        at_line_start,
-                        *macro_kind,
-                        *body_requirement,
-                        force_inline,
-                    );
-                }
-                TagPart::Close => {
-                    emit_macro_close(out, text, depth, at_line_start, force_inline);
-                }
-                TagPart::Expression => {
-                    emit_macro_expression(out, text, depth, at_line_start);
-                }
+        LeafKind::Prose { is_prose } => {
+            if *is_prose {
+                // Player-rendering prose: preserve all newlines, only
+                // normalize indentation.
+                emit_player_text(out, text, depth, at_line_start);
+            } else {
+                // Non-rendering prose (inside <<script>>/<<silently>>):
+                // treat like code, safe to normalize indentation.
+                emit_code_text(out, text, depth, at_line_start);
             }
         }
+        LeafKind::Markup(markup_kind) => {
+            // Markup renders to the player — preserve all newlines.
+            // Normalize the marker spacing (!heading → ! heading).
+            emit_markup(out, text, *markup_kind, depth, at_line_start);
+        }
+        LeafKind::MacroTag { .. } => {
+            // Structural — doesn't render. Safe to normalize whitespace
+            // inside the tag and apply indentation.
+            emit_macro_tag(out, text, depth, at_line_start);
+        }
         LeafKind::Raw { .. } => {
-            // Emit raw content as-is, indented to the current depth at line
-            // starts. We don't normalize internal whitespace — a JS/CSS
-            // sub-formatter would do that. We DO indent each line of the raw
-            // block to the current depth so the raw block sits at the right
-            // indentation level relative to its enclosing macro.
-            emit_text(out, text, depth, at_line_start);
+            // JS/CSS — emit as-is, preserving newlines (a language
+            // sub-formatter would handle internal formatting).
+            emit_player_text(out, text, depth, at_line_start);
         }
         LeafKind::Error { .. } => {
-            // Should be unreachable — format_passage() returns None early if
-            // any Error leaves exist. But handle defensively: emit raw.
-            emit_text(out, text, depth, at_line_start);
+            // Should be unreachable — format_passage() returns None early.
+            emit_player_text(out, text, depth, at_line_start);
         }
     }
 }
 
 /// Emit markup text with SugarCube-specific normalization.
 ///
-/// Formatting rules vary by markup kind:
+/// Markup renders to the player, so all newlines are preserved verbatim.
+/// The only transformation is marker spacing normalization:
 /// - **Heading** (`!`, `!!`, etc.): ensure exactly one space after the `!`s.
 ///   `!heading` → `! heading`, `!!  heading` → `!! heading`.
 /// - **ListItem** (`*`, `**`, `#`, `##`): ensure exactly one space after the marker.
 ///   `*item` → `* item`, `*  item` → `* item`.
 /// - **Blockquote** (`>`): ensure exactly one space after `>`.
 ///   `>quote` → `> quote`.
-/// - Other markup: emit as prose (no special normalization).
+/// - Other markup: emit as-is (preserve newlines).
 fn emit_markup(
     out: &mut String,
     text: &str,
@@ -512,15 +300,11 @@ fn emit_markup(
 
     match markup_kind {
         MarkupKind::Heading | MarkupKind::ListItem | MarkupKind::Blockquote => {
-            // Normalize the marker: ensure exactly one space after the marker
-            // prefix (!, !!, *, **, #, ##, >, >>).
             let normalized = normalize_markup_marker(text, markup_kind);
-            emit_text(out, &normalized, depth, at_line_start);
+            emit_player_text(out, &normalized, depth, at_line_start);
         }
         _ => {
-            // Other markup (InlineStyle, TextFormat, Link, Comment, CodeBlock,
-            // InlineCode, Verbatim, Table, HorizontalRule) — emit as prose.
-            emit_text(out, text, depth, at_line_start);
+            emit_player_text(out, text, depth, at_line_start);
         }
     }
 }
@@ -538,7 +322,6 @@ fn emit_markup(
 fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> String {
     use knot_core::zoning::MarkupKind;
 
-    // Determine the marker characters for this markup kind.
     let marker_chars: &[char] = match kind {
         MarkupKind::Heading => &['!'],
         MarkupKind::ListItem => &['*', '#'],
@@ -546,7 +329,6 @@ fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> S
         _ => return text.to_string(),
     };
 
-    // Split into lines, normalize only the first line (which has the marker).
     let mut lines = text.split_inclusive('\n');
     let first = lines.next();
 
@@ -560,17 +342,14 @@ fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> S
             first_line
         };
 
-        // Count leading marker chars.
         let marker_count = content
             .chars()
             .take_while(|c| marker_chars.contains(c))
             .count();
 
         if marker_count > 0 {
-            // Extract the marker and the rest.
             let marker = &content[..marker_count];
             let rest = content[marker_count..].trim_start_matches(' ');
-            // Reassemble: marker + " " + rest (if rest is non-empty).
             if rest.is_empty() {
                 result.push_str(marker);
             } else {
@@ -579,8 +358,6 @@ fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> S
                 result.push_str(rest);
             }
         } else {
-            // No marker found (shouldn't happen for well-formed markup, but
-            // handle defensively) — emit as-is.
             result.push_str(content);
         }
 
@@ -589,7 +366,6 @@ fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> S
         }
     }
 
-    // Emit remaining lines as-is.
     for line in lines {
         result.push_str(line);
     }
@@ -597,86 +373,38 @@ fn normalize_markup_marker(text: &str, kind: knot_core::zoning::MarkupKind) -> S
     result
 }
 
-/// Emit prose/markup text, indenting each line to `depth`.
+/// Emit text that renders to the player — preserve all newlines verbatim.
 ///
-/// Formatting rules (tighter inside macro bodies):
-/// - **Inside macro bodies (depth > 0)**: blank lines are suppressed entirely.
-///   The body content is packed tightly — no blank lines between open tag and
-///   content, no blank lines between content items, no blank lines before the
-///   close tag. This produces neat, compact macro bodies.
-/// - **At top level (depth == 0)**: blank lines are preserved but collapsed
-///   to at most one consecutive blank line. This preserves visual separation
-///   between top-level elements without creating random gaps.
+/// In SugarCube, every `\n` becomes a `<br>` in the rendered output. This
+/// function preserves the exact newline structure of the source — it does NOT
+/// trim, collapse, or add newlines. The only transformation is indentation
+/// normalization:
 ///
-/// Normalizes leading whitespace on each line (strips existing indentation,
-/// then re-applies the formatter's indentation) — this ensures idempotency.
-fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool) {
+/// - Strips existing leading whitespace on each line and re-applies canonical
+///   indentation (depth × `\t`).
+/// - Block markers (`!`, `*`, `#`, `>`, `|`) are NOT indented when inside
+///   macro bodies — they must be at column 0 for SugarCube to recognize them.
+fn emit_player_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool) {
     if text.is_empty() {
         return;
     }
 
-    // Normalize \r\n → \n (and lone \r → \n) so all newline handling below
-    // only deals with \n. This follows the same CRLF-awareness pattern used
-    // throughout the codebase (see twine_core.rs, snowman/mod.rs,
-    // chapbook/mod.rs, sugarcube/lexer.rs). Without this, \r characters
-    // survive the leading-newline trim and blank-line detection on Windows
-    // (CRLF) files, producing extra tab-only lines inside macro bodies.
+    // Normalize \r\n → \n, then strip any remaining lone \r. A lone \r at
+    // the end of a zone leaf is NOT a line break — it's the first byte of a
+    // \r\n pair that was split across zone boundaries by the zone builder
+    // (the \n is at the start of the next leaf). Converting it to \n would
+    // create a spurious extra newline. Stripping it is safe because the next
+    // leaf starts with \n, which provides the line break.
     let owned_normalized;
-    let mut text = if text.contains('\r') {
-        owned_normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text = if text.contains('\r') {
+        owned_normalized = text.replace("\r\n", "\n").replace('\r', "");
         owned_normalized.as_str()
     } else {
         text
     };
 
-    // Trim leading newlines if we're already at a line start.
-    // - Inside macro bodies (depth > 0): trim ALL leading newlines — no blank
-    //   lines between open tag and content.
-    // - At top level (depth == 0): trim all but one newline — preserve ONE
-    //   blank line between top-level elements (visual separation).
-    if *at_line_start {
-        if depth > 0 {
-            // Inside a macro body: remove ALL leading newlines.
-            while text.starts_with('\n') {
-                text = &text[1..];
-            }
-        } else {
-            // Top level: preserve exactly one blank line (one newline after
-            // the current line's newline = one blank line). Remove extras.
-            // The previous element already ended with \n, so:
-            // - 0 leading newlines → content follows immediately (no blank line)
-            // - 1+ leading newlines → keep one (one blank line), remove extras
-            if text.starts_with('\n') {
-                // Keep one newline (one blank line), remove the rest.
-                text = &text[1..];
-                while text.starts_with('\n') {
-                    text = &text[1..];
-                }
-                // Emit the blank line now.
-                out.push('\n');
-            }
-        }
-    }
-
-    if text.is_empty() {
-        return;
-    }
-
-    // Inside macro bodies, trim trailing whitespace-only lines (the blank
-    // lines before a close tag). We strip trailing whitespace+newlines and
-    // re-attach a single newline so the content is properly terminated.
-    let owned_text;
-    if depth > 0 && text.ends_with('\n') {
-        let trimmed = text.trim_end_matches(['\t', ' ', '\n']);
-        if !trimmed.is_empty() && trimmed != text {
-            owned_text = format!("{}\n", trimmed);
-            text = &owned_text;
-        }
-    }
-
     let indent = indent_str(depth);
-    let mut first = true;
-    let mut last_was_blank = false;
+
     for line in text.split_inclusive('\n') {
         let is_newline_terminated = line.ends_with('\n');
         let line_content = if is_newline_terminated {
@@ -685,159 +413,83 @@ fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool)
             line
         };
 
-        // Determine if this line starts at a line boundary (after a newline).
-        let at_boundary = if first { *at_line_start } else { true };
+        if *at_line_start {
+            let stripped = line_content.trim_start_matches(['\t', ' ']);
+            let is_block_marker = stripped
+                .chars()
+                .next()
+                .is_some_and(|c| matches!(c, '!' | '*' | '#' | '>' | '|'));
 
-        let normalized = if at_boundary {
-            line_content.trim_start_matches(['\t', ' '])
+            if !stripped.is_empty() && !(is_block_marker && depth > 0) {
+                out.push_str(&indent);
+            }
+            out.push_str(stripped);
         } else {
-            line_content
-        };
-        let is_blank = at_boundary && normalized.is_empty();
-
-        if is_blank {
-            // Blank line handling:
-            // - Inside macro bodies (depth > 0): suppress entirely.
-            // - At top level: allow at most one consecutive blank line.
-            if depth > 0 {
-                // Skip blank lines inside macro bodies.
-                last_was_blank = true;
-                first = false;
-                continue;
-            }
-            if last_was_blank {
-                // Already had a blank line — skip consecutive blanks.
-                first = false;
-                continue;
-            }
-            last_was_blank = true;
-            // Emit the blank line (just the newline).
-            if is_newline_terminated {
-                out.push('\n');
-            }
-            first = false;
-            continue;
-        }
-
-        last_was_blank = false;
-
-        if !first || *at_line_start {
-            out.push_str(&indent);
-            out.push_str(normalized);
-        } else {
-            out.push_str(normalized);
+            out.push_str(line_content);
         }
 
         if is_newline_terminated {
             out.push('\n');
+            *at_line_start = true;
+        } else if !line_content.trim().is_empty() {
+            *at_line_start = false;
         }
-
-        first = false;
     }
+}
 
-    // If the entire text was whitespace-only (after trimming), we're still
-    // at a line start.
-    let all_whitespace = text.chars().all(|c| c == '\t' || c == ' ' || c == '\n');
-    if all_whitespace && *at_line_start {
+/// Emit non-rendering text (inside `<<script>>`/`<<silently>>`) — treat like
+/// code. Safe to normalize indentation without worrying about newlines
+/// affecting the rendered output (these zones don't render to the player).
+fn emit_code_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool) {
+    if text.is_empty() {
         return;
     }
 
-    let trailing_newline = text.ends_with('\n')
-        || text.rfind('\n').is_some_and(|pos| {
-            text[pos + 1..].chars().all(|c| c == '\t' || c == ' ')
-        });
-    *at_line_start = trailing_newline;
-}
-
-/// Emit a macro open tag.
-///
-/// For block macros (those with a body) and SubMacros (`<<else>>`, `<<case>>`,
-/// `<<default>>`), the open tag goes on its own line. For inline macros (no
-/// body), the tag stays inline with surrounding prose.
-///
-/// `force_inline` — when true, emit inline even for block macros (used for
-/// empty-body macros like `<<link>><</link>>`).
-fn emit_macro_open(
-    out: &mut String,
-    text: &str,
-    depth: u32,
-    at_line_start: &mut bool,
-    macro_kind: Option<knot_core::types::MacroKind>,
-    body_requirement: Option<knot_core::types::BodyRequirement>,
-    force_inline: bool,
-) {
-    use knot_core::types::{BodyRequirement, MacroKind};
-
-    // A macro goes on its own line if it's a Container (has a body), a
-    // SubMacro (like <<else>>, <<case>> — these are structural markers that
-    // should be on their own line at the parent's depth), or has a
-    // Required/Optional body requirement.
-    //
-    // **Exception**: if `body_requirement` is `Some(Never)`, the macro is
-    // inline (e.g., a custom widget registered without `container`). Even if
-    // the parser paired it with a close tag (because `lookup_body_requirement`
-    // defaults to `Optional` for unknown macros during tree building), the
-    // zone builder looks up the real `body_requirement` from the registry —
-    // and `Never` means "no body, stay inline."
-    let is_own_line = !force_inline
-        && !matches!(body_requirement, Some(BodyRequirement::Never))
-        && (matches!(macro_kind, Some(MacroKind::Container | MacroKind::SubMacro))
-            || matches!(body_requirement, Some(BodyRequirement::Required | BodyRequirement::Optional)));
-
-    if is_own_line {
-        // Block/SubMacro open — put on its own line.
-        if !*at_line_start {
-            out.push('\n');
-        }
-        out.push_str(&indent_str(depth));
-        out.push_str(&normalize_macro_tag(text));
-        out.push('\n');
-        *at_line_start = true;
+    let owned_normalized;
+    let text = if text.contains('\r') {
+        owned_normalized = text.replace("\r\n", "\n").replace('\r', "");
+        owned_normalized.as_str()
     } else {
-        // Inline macro — keep inline. Indent if at line start.
+        text
+    };
+
+    let indent = indent_str(depth);
+
+    for line in text.split_inclusive('\n') {
+        let is_newline_terminated = line.ends_with('\n');
+        let line_content = if is_newline_terminated {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+
         if *at_line_start {
-            out.push_str(&indent_str(depth));
+            let stripped = line_content.trim_start_matches(['\t', ' ']);
+            if !stripped.is_empty() {
+                out.push_str(&indent);
+            }
+            out.push_str(stripped);
+        } else {
+            out.push_str(line_content);
         }
-        out.push_str(&normalize_macro_tag(text));
-        *at_line_start = false;
+
+        if is_newline_terminated {
+            out.push('\n');
+            *at_line_start = true;
+        } else if !line_content.trim().is_empty() {
+            *at_line_start = false;
+        }
     }
 }
 
-/// Emit a macro close tag (`<</name>>`).
+/// Emit a macro tag (open, close, or expression).
 ///
-/// Close tags go on their own line, at the same depth as the open tag.
-/// The close tag emits a trailing newline so subsequent content starts on
-/// a fresh line.
-///
-/// `force_inline` — when true, emit inline (no newline + indent). Used for
-/// empty-body macros where the close tag immediately follows the open tag.
-fn emit_macro_close(
-    out: &mut String,
-    text: &str,
-    depth: u32,
-    at_line_start: &mut bool,
-    force_inline: bool,
-) {
-    if force_inline {
-        // Empty-body macro — emit close tag right after the open tag, inline.
-        out.push_str(&normalize_macro_tag(text));
-        *at_line_start = false;
-        return;
-    }
-
-    if !*at_line_start {
-        out.push('\n');
-    }
-    out.push_str(&indent_str(depth));
-    out.push_str(&normalize_macro_tag(text));
-    out.push('\n');
-    *at_line_start = true;
-}
-
-/// Emit an expression macro (`<<=>>expr>>` / `<<->>expr>>`).
-///
-/// Expression macros stay inline with surrounding prose.
-fn emit_macro_expression(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool) {
+/// The tag is emitted with indentation if at a line start. No newlines are
+/// added before or after the tag — the newlines between macro tags and
+/// surrounding content are in the Prose/Markup leaves, which preserve them
+/// verbatim. This ensures the formatter doesn't change the rendered output
+/// (in SugarCube, every `\n` becomes a `<br>`).
+fn emit_macro_tag(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool) {
     if *at_line_start {
         out.push_str(&indent_str(depth));
     }
@@ -853,7 +505,11 @@ fn emit_macro_expression(out: &mut String, text: &str, depth: u32, at_line_start
 /// **Important**: spaces inside string literals are preserved. We track
 /// single/double quote state to avoid collapsing spaces inside strings.
 fn normalize_macro_tag(text: &str) -> String {
-    let trimmed = text.trim();
+    // Normalize \r\n → \n and strip \r, then trim. This handles Windows
+    // (CRLF) line endings inside macro tags, following the same pattern
+    // used in emit_player_text above.
+    let normalized = text.replace("\r\n", "\n").replace('\r', "");
+    let trimmed = normalized.trim();
     let mut result = String::with_capacity(trimmed.len());
     let mut prev_was_space = false;
     let mut in_single_quote = false;
@@ -928,7 +584,10 @@ mod tests {
     /// management in this phase — the formatted output is deterministic.
     fn assert_format_eq(body: &str, expected: &str) {
         let formatted = format_body(body).unwrap_or_else(|| {
-            panic!("formatter refused to format (Error leaves present) for body: {:?}", body)
+            panic!(
+                "formatter refused to format (Error leaves present) for body: {:?}",
+                body
+            )
         });
         assert_eq!(
             formatted, expected,
@@ -952,10 +611,7 @@ mod tests {
     /// A block macro gets its body indented.
     #[test]
     fn test_block_macro_indent() {
-        assert_format_eq(
-            "<<if $x>>\nhello\n<</if>>",
-            "<<if $x>>\n\thello\n<</if>>",
-        );
+        assert_format_eq("<<if $x>>\nhello\n<</if>>", "<<if $x>>\n\thello\n<</if>>");
     }
 
     /// Nested block macros indent at each level.
@@ -1025,7 +681,11 @@ mod tests {
         let body = "<<if $x>>\nhello\n<</if>>";
         let once = format_body(body).unwrap();
         let twice = format_body(&once).unwrap();
-        assert_eq!(once, twice, "formatter is not idempotent:\nonce: {:?}\ntwice: {:?}", once, twice);
+        assert_eq!(
+            once, twice,
+            "formatter is not idempotent:\nonce: {:?}\ntwice: {:?}",
+            once, twice
+        );
     }
 
     /// Idempotency on a more complex example.
@@ -1055,16 +715,18 @@ mod tests {
         );
     }
 
-    /// Multiple blank lines between top-level block macros are collapsed to
-    /// a single newline (no blank line). This keeps the output tight.
+    /// Blank lines between top-level block macros are preserved — the
+    /// formatter does NOT collapse them because in SugarCube every `\n`
+    /// becomes a `<br>` in the rendered output.
     #[test]
     fn test_collapse_blank_lines_between_blocks() {
         let body = "<<if $x>>\nhello\n<</if>>\n\n\n\n<<if $y>>\nworld\n<</if>>";
         let formatted = format_body(body).unwrap();
-        // Should NOT contain multiple consecutive blank lines.
+        // Blank lines are preserved (not collapsed) — changing them would
+        // change the rendered output.
         assert!(
-            !formatted.contains("\n\n\n"),
-            "multiple blank lines should be collapsed: {:?}",
+            formatted.contains("<</if>>\n\n\n\n<<if $y>>"),
+            "blank lines should be preserved, got: {:?}",
             formatted
         );
     }
@@ -1100,10 +762,7 @@ mod tests {
     /// An empty-body macro with arguments stays inline.
     #[test]
     fn test_empty_body_macro_with_args_stays_inline() {
-        assert_format_eq(
-            "<<link \"Go\">><</link>>",
-            "<<link \"Go\">><</link>>",
-        );
+        assert_format_eq("<<link \"Go\">><</link>>", "<<link \"Go\">><</link>>");
     }
 
     /// An empty-body macro in prose stays inline with the surrounding text.
@@ -1123,10 +782,7 @@ mod tests {
     #[test]
     fn test_close_tag_indentation_is_minus_one() {
         // <<if>> at depth 0, body content at depth 1, <</if>> at depth 0.
-        assert_format_eq(
-            "<<if $x>>\nhello\n<</if>>",
-            "<<if $x>>\n\thello\n<</if>>",
-        );
+        assert_format_eq("<<if $x>>\nhello\n<</if>>", "<<if $x>>\n\thello\n<</if>>");
     }
 
     /// Nested block macros: close tags dedent correctly at each level.
@@ -1184,10 +840,7 @@ mod tests {
     /// 2-space indented body content is normalized to tab indentation.
     #[test]
     fn test_consumes_2space_indent() {
-        assert_format_eq(
-            "<<if $x>>\n  hello\n<</if>>",
-            "<<if $x>>\n\thello\n<</if>>",
-        );
+        assert_format_eq("<<if $x>>\n  hello\n<</if>>", "<<if $x>>\n\thello\n<</if>>");
     }
 
     /// 4-space indented body content is normalized to tab indentation.
@@ -1220,10 +873,7 @@ mod tests {
     /// An indented close tag is dedented to the correct depth.
     #[test]
     fn test_consumes_indented_close_tag() {
-        assert_format_eq(
-            "<<if $x>>\nhello\n  <</if>>",
-            "<<if $x>>\n\thello\n<</if>>",
-        );
+        assert_format_eq("<<if $x>>\nhello\n  <</if>>", "<<if $x>>\n\thello\n<</if>>");
     }
 
     /// Leading whitespace on top-level prose is stripped (it's indentation, not content).
@@ -1259,26 +909,36 @@ mod tests {
         );
     }
 
-    /// A newline-only body is NOT content — `<<link>>\n<</link>>` collapses
-    /// to `<<link>><</link>>` (inline, no newline between tags).
+    /// A newline-only body is preserved — `<<link>>\n<</link>>` stays as-is
+    /// because the `\n` becomes a `<br>` in the rendered output. Collapsing
+    /// it would change the game.
     #[test]
     fn test_newline_only_body_collapses() {
-        assert_format_eq("<<link>>\n<</link>>", "<<link>><</link>>");
+        // The formatter preserves the newline — it does NOT collapse.
+        assert_format_eq("<<link>>\n<</link>>", "<<link>>\n<</link>>");
     }
 
-    /// A whitespace-only body (spaces + newline) also collapses to inline.
+    /// A whitespace-only body is preserved (not collapsed).
     #[test]
     fn test_whitespace_only_body_collapses() {
-        assert_format_eq("<<link>>  \n  <</link>>", "<<link>><</link>>");
+        let formatted = format_body("<<link>>  \n  <</link>>").unwrap();
+        // The newline is preserved; only indentation is normalized.
+        assert!(
+            formatted.contains("<<link>>"),
+            "should contain open tag: {:?}",
+            formatted
+        );
+        assert!(
+            formatted.contains("<</link>>"),
+            "should contain close tag: {:?}",
+            formatted
+        );
     }
 
-    /// A newline-only body with args collapses to inline.
+    /// A newline-only body with args is preserved (not collapsed).
     #[test]
     fn test_newline_only_body_with_args_collapses() {
-        assert_format_eq(
-            "<<link \"Go\">>\n<</link>>",
-            "<<link \"Go\">><</link>>",
-        );
+        assert_format_eq("<<link \"Go\">>\n<</link>>", "<<link \"Go\">>\n<</link>>");
     }
 
     // ===================================================================
@@ -1321,12 +981,14 @@ mod tests {
         assert_format_eq(">quote", "> quote");
     }
 
-    /// Heading inside a macro body is normalized with indentation.
+    /// Heading inside a macro body is normalized but NOT indented — block
+    /// markers (`!`, `*`, `#`, `>`) must be at column 0 for SugarCube to
+    /// recognize them. Indenting `!` would break the heading.
     #[test]
     fn test_heading_in_macro_body() {
         assert_format_eq(
             "<<if $x>>\n!heading\n<</if>>",
-            "<<if $x>>\n\t! heading\n<</if>>",
+            "<<if $x>>\n! heading\n<</if>>",
         );
     }
 
@@ -1368,8 +1030,8 @@ mod tests {
         );
     }
 
-    /// Blank lines between top-level block macros are preserved as exactly
-    /// one blank line, and the formatter is idempotent.
+    /// Blank lines between top-level block macros are preserved (not
+    /// collapsed), and the formatter is idempotent.
     #[test]
     fn test_blank_between_macros_idempotent() {
         let body = "<<if $x>>\n\thello\n<</if>>\n\n\n<<if $y>>\n\tworld\n<</if>>";
@@ -1382,17 +1044,11 @@ mod tests {
             f1, f2
         );
         assert_eq!(f2, f3, "still growing: f2 != f3");
-        // Should have exactly one blank line between the blocks.
+        // Blank lines are preserved (not collapsed to one).
         assert!(
-            f1.contains("<</if>>\n\n<<if $y>>"),
-            "should have one blank line between blocks: {:?}",
+            f1.contains("<</if>>\n\n\n<<if $y>>"),
+            "blank lines should be preserved: {:?}",
             f1
         );
     }
-
-
-
 }
-
-
-

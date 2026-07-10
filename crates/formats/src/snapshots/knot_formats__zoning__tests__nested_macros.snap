@@ -1,0 +1,21 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..  10) MacroTag(Open name=macro1 kind=Unknown)       body=None | "<<macro1>>"
+  [  10..  16) Prose                                         body=0 | "\ntext\n"
+  [  16..  26) MacroTag(Open name=macro2 kind=Unknown)       body=0 | "<<macro2>>"
+  [  26..  31) Prose                                         body=1 | "inner"
+  [  31..  42) MacroTag(Close name=macro2 kind=Unknown)      body=0 | "<</macro2>>"
+  [  42..  43) Prose                                         body=0 | "\n"
+  [  43..  53) MacroTag(Open name=macro3 kind=Unknown)       body=0 | "<<macro3>>"
+  [  53..  64) Prose                                         body=2 | "\nbody text\n"
+  [  64..  75) MacroTag(Close name=macro3 kind=Unknown)      body=0 | "<</macro3>>"
+  [  75..  76) Prose                                         body=0 | "\n"
+  [  76..  87) MacroTag(Close name=macro1 kind=Unknown)      body=None | "<</macro1>>"
+
+=== Bodies ===
+  [0] [  10..  76) name=macro1       depth=0 parent=None close=[76..87)
+  [1] [  26..  31) name=macro2       depth=1 parent=0 close=[31..42)
+  [2] [  53..  64) name=macro3       depth=1 parent=0 close=[64..75)

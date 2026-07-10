@@ -1778,8 +1778,13 @@ mod tests {
     #[test]
     fn parse_passage_tagged_footer() {
         let mut plugin = SnowmanPlugin::new();
-        let result =
-            plugin.parse_passage_mut("BottomBar", &["footer".to_string()], "Footer content\n", "", 0);
+        let result = plugin.parse_passage_mut(
+            "BottomBar",
+            &["footer".to_string()],
+            "Footer content\n",
+            "",
+            0,
+        );
         let p = &result
             .expect("tagged [footer] passage should be classified as special")
             .passages[0];

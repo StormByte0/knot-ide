@@ -1,0 +1,15 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..   1) Markup(Heading)                               body=None | "!"
+  [   1..   9) Prose                                         body=None | " Heading"
+  [   9..  10) Prose                                         body=None | "\n"
+  [  10..  11) Markup(ListItem)                              body=None | "*"
+  [  11..  16) Prose                                         body=None | " item"
+  [  16..  17) Prose                                         body=None | "\n"
+  [  17..  25) Markup(TextFormat)                            body=None | "''bold''"
+
+=== Bodies ===
+  (none)

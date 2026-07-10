@@ -79,7 +79,10 @@ pub(super) fn parse_full(plugin: &mut SugarCubePlugin, uri: &Url, text: &str) ->
         // All spans are passage-relative (shifted by body_offset_in_passage).
         // The custom macro registry is already populated from earlier [widget]
         // and [script] passages (sort-for-processing order).
-        if matches!(mode, ParseMode::Normal | ParseMode::Widget | ParseMode::Interface) {
+        if matches!(
+            mode,
+            ParseMode::Normal | ParseMode::Widget | ParseMode::Interface
+        ) {
             passage_ast.zones = crate::zoning::build_from_ast(
                 &passage_ast.nodes,
                 body_offset_in_passage,
@@ -415,20 +418,31 @@ pub fn parse_single(
     // The `body_offset_in_passage` is set to the header length so zone spans
     // are correctly relative to the passage head (`::`), matching what
     // `parse_full` produces.
-    let header_line_end = passage_text
-        .find('\n')
-        .map(|pos| pos + 1)
-        .unwrap_or(passage_text.len());
-    let body_text = &passage_text[header_line_end..];
-    let body_offset_in_passage = header_line_end;
+    //
+    // **Body-only fallback**: If `passage_text` does NOT start with `::`,
+    // treat the entire text as body (body_offset = 0). This supports callers
+    // that pass body-only text (e.g. unit tests, direct API usage).
+    let (body_text, body_offset_in_passage) = if passage_text.starts_with("::") {
+        let header_line_end = passage_text
+            .find('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(passage_text.len());
+        (&passage_text[header_line_end..], header_line_end)
+    } else {
+        (passage_text, 0)
+    };
 
     // Phase 1: Structural parse — parse BODY text only (no :: header)
-    let mut passage_ast = super::parser::parse_passage_body(body_text, body_offset_in_passage, mode);
+    let mut passage_ast =
+        super::parser::parse_passage_body(body_text, body_offset_in_passage, mode);
 
     // Phase 1b: Build the unified zone map (zoning engine).
     // body_offset_in_passage shifts zone spans from body-relative to
     // passage-relative (0 = `::`), matching what `parse_full` produces.
-    if matches!(mode, ParseMode::Normal | ParseMode::Widget | ParseMode::Interface) {
+    if matches!(
+        mode,
+        ParseMode::Normal | ParseMode::Widget | ParseMode::Interface
+    ) {
         let registry = plugin.registry();
         passage_ast.zones = crate::zoning::build_from_ast(
             &passage_ast.nodes,
@@ -605,10 +619,8 @@ pub fn parse_single(
         } else {
             let known_macro_names = {
                 let registry = plugin.registry();
-                let mut names: std::collections::HashSet<String> = registry
-                    .custom_macro_names()
-                    .into_iter()
-                    .collect();
+                let mut names: std::collections::HashSet<String> =
+                    registry.custom_macro_names().into_iter().collect();
                 for m in super::macros::builtin_macros() {
                     names.insert(m.name.to_string());
                 }
@@ -781,7 +793,8 @@ pub(super) fn parse_script_file(
         .as_ref()
         .map(|a| a.diagnostics.as_slice())
         .unwrap_or(&[]);
-    let js_diagnostics = super::js_validate::validate_script_passage(text, 0, true, script_diagnostics);
+    let js_diagnostics =
+        super::js_validate::validate_script_passage(text, 0, true, script_diagnostics);
     passage_diagnostics.extend(js_diagnostics);
 
     let diagnostic_group = PassageDiagnosticGroup {

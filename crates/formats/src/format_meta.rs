@@ -43,7 +43,7 @@
 //! `Macro.add()` extraction, etc.), so we reuse `knot_core::oxc::parse_js()`
 //! — no new dependencies.
 
-use knot_core::oxc::{parse_and_visit, ParseMode};
+use knot_core::oxc::{ParseMode, parse_and_visit};
 use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey, Statement};
 use serde::{Deserialize, Serialize};
 
@@ -214,11 +214,7 @@ pub fn parse_format_js(content: &str) -> Result<FormatMeta, String> {
             }
         }
 
-        if found {
-            Some(meta)
-        } else {
-            None
-        }
+        if found { Some(meta) } else { None }
     });
 
     // `outcome` is unused but available if we want to surface oxc diagnostics

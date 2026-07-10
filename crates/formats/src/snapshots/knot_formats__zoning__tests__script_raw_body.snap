@@ -1,0 +1,11 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..  10) MacroTag(Open name=script kind=Container)     body=None | "<<script>>"
+  [  10..  26) Raw(Js)                                       body=0 | "console.log($x);"
+  [  26..  37) MacroTag(Close name=script kind=Container)    body=None | "<</script>>"
+
+=== Bodies ===
+  [0] [  10..  26) name=script       depth=0 parent=None close=[26..37), raw=Js

@@ -147,18 +147,17 @@ pub fn classify_edit(
 
         // Compute the passage-relative range.
         let passage = &doc_before.passages[start_passage_idx];
-        let rel_start = byte_range
-            .start
-            .saturating_sub(passage.passage_offset);
-        let rel_end = byte_range
-            .end
-            .saturating_sub(passage.passage_offset);
+        let rel_start = byte_range.start.saturating_sub(passage.passage_offset);
+        let rel_end = byte_range.end.saturating_sub(passage.passage_offset);
         touched_passages.push((start_passage_idx, rel_start..rel_end));
     }
 
     // Step 3: all changes must touch the same passage.
     let first_passage_idx = touched_passages[0].0;
-    if touched_passages.iter().any(|(idx, _)| *idx != first_passage_idx) {
+    if touched_passages
+        .iter()
+        .any(|(idx, _)| *idx != first_passage_idx)
+    {
         return EditImpact::BoundaryCrossing;
     }
 
@@ -306,10 +305,7 @@ mod tests {
         //   ":: B\n"        = 5 bytes  (17..22)
         //   "Goodbye\n"     = 9 bytes  (22..31)
         let text = ":: A\nHello world\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..17), ("B", 17..31)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..17), ("B", 17..31)]);
         // Replace "world" (line 1, chars 6..11) with "there".
         // Line 1 starts at byte 5. Chars 6..11 = bytes 11..16. rel = 11..16.
         let changes = vec![change(1, 6, 1, 11, "there")];
@@ -332,10 +328,7 @@ mod tests {
         //   ":: B\n"    = 5 bytes (11..16)
         //   "Goodbye\n" = 9 bytes (16..25)
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
         // Replace "A" (line 0, chars 3..4) with "AA". Byte range 3..4. rel = 3..4.
         let changes = vec![change(0, 3, 0, 4, "AA")];
         let impact = classify_edit(&doc, text, &changes);
@@ -354,10 +347,7 @@ mod tests {
         // Text: ":: A\nHello\n:: B\nGoodbye\n" (25 bytes total).
         //   A span = 0..11, B span = 11..25.
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
         // Replace from line 1 char 0 ("Hello" start, byte 5) to line 2 char 4
         // (":: B" end, byte 15) — crosses the passage boundary at byte 11.
         let changes = vec![change(1, 0, 2, 4, "")];
@@ -409,10 +399,7 @@ mod tests {
         // Text: ":: A\nHello world\n:: B\nGoodbye\n"
         //   A span = 0..17, B span = 17..31.
         let text = ":: A\nHello world\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..17), ("B", 17..31)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..17), ("B", 17..31)]);
         // Insert ":: NewPassage\n" at line 1, char 5 (mid "Hello world", byte 10).
         let changes = vec![change(1, 5, 1, 5, ":: NewPassage\n")];
         let impact = classify_edit(&doc, text, &changes);
@@ -425,10 +412,7 @@ mod tests {
         // Text: ":: A\nHello\n:: B\nGoodbye\n"
         //   A span = 0..11, B span = 11..25.
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
         // Delete ":: " from line 2 (chars 0..3). Line 2 starts at byte 11.
         // Byte range 11..14. The removed text is ":: " which starts with "::".
         let changes = vec![change(2, 0, 2, 3, "")];
@@ -442,13 +426,10 @@ mod tests {
         // Text: ":: A\nHello\n:: B\nGoodbye\n"
         //   A span = 0..11, B span = 11..25.
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
         let changes = vec![
-            change(1, 0, 1, 5, "Hi"),     // passage A (byte 5..10)
-            change(3, 0, 3, 7, "Bye"),    // passage B (byte 16..23)
+            change(1, 0, 1, 5, "Hi"),  // passage A (byte 5..10)
+            change(3, 0, 3, 7, "Bye"), // passage B (byte 16..23)
         ];
         let impact = classify_edit(&doc, text, &changes);
         assert_eq!(impact, EditImpact::BoundaryCrossing);
@@ -460,10 +441,7 @@ mod tests {
         // Text: ":: A\nHello world\n:: B\nGoodbye\n"
         //   A span = 0..17, B span = 17..31.
         let text = ":: A\nHello world\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..17), ("B", 17..31)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..17), ("B", 17..31)]);
         // Line 1 starts at byte 5.
         // "Hello" is chars 0..5 = bytes 5..10.
         // "world" is chars 6..11 = bytes 11..16.
@@ -500,14 +478,8 @@ mod tests {
         // Text: ":: A\nHello\n:: B\nGoodbye\n"
         //   A span = 0..11, B span = 11..25.
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
-        let changes = vec![
-            change(1, 0, 1, 5, "Hi"),
-            change_full(":: A\nGoodbye\n"),
-        ];
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
+        let changes = vec![change(1, 0, 1, 5, "Hi"), change_full(":: A\nGoodbye\n")];
         let impact = classify_edit(&doc, text, &changes);
         assert_eq!(impact, EditImpact::WholeDocument);
     }
@@ -523,10 +495,7 @@ mod tests {
         //   ":: B\r\n"     = 6 bytes (13..19)
         //   "Goodbye\r\n" = 10 bytes (19..29)
         let text = ":: A\r\nHello\r\n:: B\r\nGoodbye\r\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..13), ("B", 13..29)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..13), ("B", 13..29)]);
         // Insert ":: NewPassage\r\n" at line 1 char 0 (byte 6).
         let changes = vec![change(1, 0, 1, 0, ":: NewPassage\r\n")];
         let impact = classify_edit(&doc, text, &changes);
@@ -598,10 +567,7 @@ mod tests {
         //   ":: B\n"   = 5 bytes (11..16)
         //   "Goodbye\n"= 9 bytes (16..25)
         let text = ":: A\nHello\n:: B\nGoodbye\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..11), ("B", 11..25)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..11), ("B", 11..25)]);
         // Replace from line 1 char 0 (byte 5) to line 2 char 0 (byte 11,
         // exactly at B's passage_offset). End is exclusive → belongs to A.
         let changes = vec![change(1, 0, 2, 0, "Hi\n")];
@@ -662,10 +628,7 @@ mod tests {
         //   ":: C\n"   = 5 bytes (24..29)
         //   "C body\n" = 7 bytes (29..36)
         let text = ":: A\nA body\n:: B\nB body\n:: C\nC body\n";
-        let doc = doc_with_passages(
-            text,
-            &[("A", 0..12), ("B", 12..24), ("C", 24..36)],
-        );
+        let doc = doc_with_passages(text, &[("A", 0..12), ("B", 12..24), ("C", 24..36)]);
         // Replace "B body" (line 3, chars 0..6) with "B edited".
         // Line 3 starts at byte 17. Chars 0..6 = bytes 17..23.
         // Passage B offset = 12. rel_start = 17 - 12 = 5. rel_end = 23 - 12 = 11.

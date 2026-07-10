@@ -655,27 +655,27 @@ fn try_close_tag_hover(
                 part: knot_core::zoning::TagPart::Close,
                 ..
             } = &leaf.kind
-            {
-                // Only show hover if this is a known builtin macro.
-                if plugin.find_macro(macro_name).is_some() {
-                    let close_label = plugin.format_close_macro_label(macro_name);
-                    let hover_text = format!(
-                        "**`{}`** `Close tag`\n\nCloses the `{}` block.",
-                        close_label,
-                        plugin.format_macro_label(macro_name)
-                    );
-                    // Convert the leaf's passage-relative span to an LSP range.
-                    let abs_span = passage.abs_range(&leaf.span);
-                    let range = helpers::byte_range_to_lsp_range(text, &abs_span);
-                    return Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: hover_text,
-                        }),
-                        range: Some(range),
-                    });
-                }
+        {
+            // Only show hover if this is a known builtin macro.
+            if plugin.find_macro(macro_name).is_some() {
+                let close_label = plugin.format_close_macro_label(macro_name);
+                let hover_text = format!(
+                    "**`{}`** `Close tag`\n\nCloses the `{}` block.",
+                    close_label,
+                    plugin.format_macro_label(macro_name)
+                );
+                // Convert the leaf's passage-relative span to an LSP range.
+                let abs_span = passage.abs_range(&leaf.span);
+                let range = helpers::byte_range_to_lsp_range(text, &abs_span);
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: hover_text,
+                    }),
+                    range: Some(range),
+                });
             }
+        }
     }
 
     // ── Fallback: line-based backward scan for mid-typing cases ─────
@@ -1859,22 +1859,23 @@ fn try_block_markup_hover(
     if let Some(passage) = passage {
         let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
         if let Some(leaf) = passage.zones.leaf_at(passage_offset)
-            && let knot_core::zoning::LeafKind::Markup(kind) = &leaf.kind {
-                // Build hover text from the markup kind. We need to extract
-                // the marker text from the source to get the level/depth.
-                let abs_span = passage.abs_range(&leaf.span);
-                let marker_text = &text[abs_span.start.min(text.len())..abs_span.end.min(text.len())];
-                if let Some(hover_text) = build_markup_hover_text(kind, marker_text) {
-                    let range = helpers::byte_range_to_lsp_range(text, &abs_span);
-                    return Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: hover_text,
-                        }),
-                        range: Some(range),
-                    });
-                }
+            && let knot_core::zoning::LeafKind::Markup(kind) = &leaf.kind
+        {
+            // Build hover text from the markup kind. We need to extract
+            // the marker text from the source to get the level/depth.
+            let abs_span = passage.abs_range(&leaf.span);
+            let marker_text = &text[abs_span.start.min(text.len())..abs_span.end.min(text.len())];
+            if let Some(hover_text) = build_markup_hover_text(kind, marker_text) {
+                let range = helpers::byte_range_to_lsp_range(text, &abs_span);
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: hover_text,
+                    }),
+                    range: Some(range),
+                });
             }
+        }
     }
 
     // ── Fallback: line-based column-0 detection ─────────────────────
@@ -3719,8 +3720,8 @@ mod block_markup_hover_tests {
 #[cfg(test)]
 mod phase6_zone_hover_tests {
     use super::*;
-    use knot_formats::sugarcube::SugarCubePlugin;
     use knot_formats::FormatPluginMut;
+    use knot_formats::sugarcube::SugarCubePlugin;
     use url::Url;
 
     /// Helper: parse a source document and return (text, doc, plugin, uri).
@@ -4290,9 +4291,9 @@ mod link_hover_tests {
 #[cfg(test)]
 mod container_violation_tests {
     use super::*;
-    use knot_formats::sugarcube::SugarCubePlugin;
     use knot_formats::FormatPlugin;
     use knot_formats::FormatPluginMut;
+    use knot_formats::sugarcube::SugarCubePlugin;
     use url::Url;
 
     /// Helper: parse a single-passage document and return (doc, plugin).

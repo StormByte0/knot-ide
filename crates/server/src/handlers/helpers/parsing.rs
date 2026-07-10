@@ -738,7 +738,10 @@ mod tests {
         assert_eq!(group.passage_name, "A");
         assert_eq!(group.passage_offset, 100);
         assert_eq!(group.diagnostics.len(), 1);
-        assert_eq!(group.diagnostics[0].severity, fmt_plugin::FormatDiagnosticSeverity::Error);
+        assert_eq!(
+            group.diagnostics[0].severity,
+            fmt_plugin::FormatDiagnosticSeverity::Error
+        );
         assert_eq!(group.diagnostics[0].code, "sc-parse");
         assert!(group.diagnostics[0].message.contains("boom"));
         // Span covers the passage (passage-relative 0..50).

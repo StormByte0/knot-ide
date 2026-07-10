@@ -52,10 +52,7 @@ struct MacroDefSnapshot {
     body_is_raw: bool,
 }
 
-fn lookup_macro(
-    name: &str,
-    custom_macros: &CustomMacroRegistry,
-) -> Option<MacroDefSnapshot> {
+fn lookup_macro(name: &str, custom_macros: &CustomMacroRegistry) -> Option<MacroDefSnapshot> {
     // Try builtin catalog first.
     if let Some(def) = find_macro(name) {
         return Some(MacroDefSnapshot {
@@ -118,10 +115,14 @@ impl<'a> ZoneBuilder<'a> {
                     if let Some(lang) = body.raw_language {
                         LeafKind::Raw { language: lang }
                     } else {
-                        LeafKind::Prose { is_prose: *is_prose }
+                        LeafKind::Prose {
+                            is_prose: *is_prose,
+                        }
                     }
                 } else {
-                    LeafKind::Prose { is_prose: *is_prose }
+                    LeafKind::Prose {
+                        is_prose: *is_prose,
+                    }
                 };
                 self.leaves.push(LeafZone {
                     span: self.shift(span),
@@ -465,9 +466,12 @@ impl<'a> ZoneBuilder<'a> {
                 if w[0].span.end > w[1].span.start {
                     tracing::warn!(
                         "Zone overlap detected: [{}, {}) overlaps [{}, {}) — {:?} vs {:?}",
-                        w[0].span.start, w[0].span.end,
-                        w[1].span.start, w[1].span.end,
-                        w[0].kind, w[1].kind
+                        w[0].span.start,
+                        w[0].span.end,
+                        w[1].span.start,
+                        w[1].span.end,
+                        w[0].kind,
+                        w[1].kind
                     );
                 }
             }
@@ -675,7 +679,10 @@ body text
         // Verify: a leaf at the `<<set>>` position has body_idx == None.
         let set_offset = input.find("<<set").unwrap();
         let leaf = zones.leaf_at(set_offset).expect("leaf at <<set>>");
-        assert!(leaf.body_idx.is_none(), "leaf at <<set>> should be top-level");
+        assert!(
+            leaf.body_idx.is_none(),
+            "leaf at <<set>> should be top-level"
+        );
     }
 
     #[test]
@@ -692,10 +699,7 @@ body text
         insta::assert_snapshot!(zones.debug_dump(&body));
 
         // The first leaf should start at offset 10, not 0.
-        assert!(
-            zones.leaf_count() > 0,
-            "should have at least one leaf"
-        );
+        assert!(zones.leaf_count() > 0, "should have at least one leaf");
         // Access first leaf via iter_leaves (leaf_at needs an offset).
         let first = zones.iter_leaves().next().unwrap();
         assert!(
@@ -718,7 +722,8 @@ body text
         let stack = zones.body_stack_at(if_body_offset);
         let names: Vec<&str> = stack.iter().map(|b| b.macro_name.as_str()).collect();
         assert_eq!(
-            names, vec!["link", "capture", "if"],
+            names,
+            vec!["link", "capture", "if"],
             "body stack should be [link, capture, if] inside <<if>> body"
         );
     }
@@ -730,10 +735,18 @@ body text
             let snippet = &body[leaf.span.start.min(body.len())..leaf.span.end.min(body.len())];
             match &leaf.kind {
                 LeafKind::Prose { is_prose: true } => {
-                    assert!(ZoneMap::renders_to_player(leaf), "prose should render: {:?}", snippet);
+                    assert!(
+                        ZoneMap::renders_to_player(leaf),
+                        "prose should render: {:?}",
+                        snippet
+                    );
                 }
                 LeafKind::MacroTag { .. } => {
-                    assert!(!ZoneMap::renders_to_player(leaf), "macro tag should not render: {:?}", snippet);
+                    assert!(
+                        !ZoneMap::renders_to_player(leaf),
+                        "macro tag should not render: {:?}",
+                        snippet
+                    );
                 }
                 _ => {}
             }
@@ -799,7 +812,10 @@ body text
         assert!(leaf.is_some(), "leaf_at should find the <<set>> macro tag");
         match &leaf.unwrap().kind {
             LeafKind::MacroTag { macro_name, .. } => {
-                assert_eq!(macro_name, "set", "leaf at <<set>> should be a MacroTag for 'set'");
+                assert_eq!(
+                    macro_name, "set",
+                    "leaf at <<set>> should be a MacroTag for 'set'"
+                );
             }
             other => panic!("expected MacroTag, got {:?}", other),
         }

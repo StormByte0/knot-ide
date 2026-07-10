@@ -26,7 +26,9 @@ use crate::plugin::{
     SemanticTokenType,
 };
 use crate::sugarcube::ast;
-use crate::sugarcube::macros::{deprecated_macros, find_macro, folding_modifier_names, macro_parent_constraints};
+use crate::sugarcube::macros::{
+    deprecated_macros, find_macro, folding_modifier_names, macro_parent_constraints,
+};
 use crate::sugarcube::special_passages;
 
 /// Build semantic tokens from AST nodes.
@@ -1514,7 +1516,10 @@ fn build_diagnostics_inner(
     body_offset_in_passage: usize,
     custom_macros: &crate::sugarcube::registries::CustomMacroRegistry,
     dep_macros: &std::collections::HashMap<&'static str, &'static str>,
-    parent_constraints: &std::collections::HashMap<&'static str, std::collections::HashSet<&'static str>>,
+    parent_constraints: &std::collections::HashMap<
+        &'static str,
+        std::collections::HashSet<&'static str>,
+    >,
     enclosing_stack: &mut Vec<String>,
 ) {
     for node in nodes {
@@ -1540,8 +1545,7 @@ fn build_diagnostics_inner(
             // custom macro registry, emit a hint. Custom widgets are
             // registered early (via [widget] and [script] passages), so
             // an unknown macro at this point is genuinely undefined.
-            let is_known = find_macro(name).is_some()
-                || custom_macros.contains(name);
+            let is_known = find_macro(name).is_some() || custom_macros.contains(name);
             if !is_known {
                 diagnostics.push(FormatDiagnostic {
                     range: body_offset_in_passage + name_span.start
@@ -1563,10 +1567,8 @@ fn build_diagnostics_inner(
                     .iter()
                     .any(|enc| valid_parents.contains(enc.as_str()));
                 if !inside_valid_parent {
-                    let allowed_str: Vec<String> = valid_parents
-                        .iter()
-                        .map(|p| format!("<<{}>>", p))
-                        .collect();
+                    let allowed_str: Vec<String> =
+                        valid_parents.iter().map(|p| format!("<<{}>>", p)).collect();
                     diagnostics.push(FormatDiagnostic {
                         range: body_offset_in_passage + name_span.start
                             ..body_offset_in_passage + name_span.end,
@@ -2275,8 +2277,7 @@ mod phase8_diagnostics_tests {
     /// `<<else>>` inside `<<if>>` nested inside `<<link>>` → NO violation.
     #[test]
     fn else_in_nested_if_inside_link_no_violation() {
-        let diags =
-            diagnostics_for("<<link \"Go\">><<if $x>>text<<else>>more<</if>><</link>>");
+        let diags = diagnostics_for("<<link \"Go\">><<if $x>>text<<else>>more<</if>><</link>>");
         assert!(
             find_by_code(&diags, "sc-container-violation").is_none(),
             "<<else>> inside <<if>> inside <<link>> should NOT emit violation: got {:?}",

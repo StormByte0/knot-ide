@@ -25,7 +25,7 @@ use crate::sugarcube::ast::{AnalyzedVarOp, AstNode, JsAnalysis, PassageAst};
 use crate::sugarcube::js::js_preprocess;
 use crate::sugarcube::js::js_walk;
 use crate::sugarcube::registries::variable_tree::VarAccessKind;
-use knot_core::oxc::{parse_and_visit, ParseMode as JsParseMode};
+use knot_core::oxc::{ParseMode as JsParseMode, parse_and_visit};
 use oxc_span::GetSpan;
 
 /// Annotate AST nodes with JS analysis results (Phase 2).
@@ -91,11 +91,10 @@ fn annotate_script_passage(passage_ast: &mut PassageAst, body_text: &str, sugarc
     // Task 1 (optimization): we capture `outcome.diagnostics` and store
     // them on `JsAnalysis.diagnostics` so `validate_script_passage` can
     // consume them WITHOUT re-parsing the same source.
-    let (outcome, analysis) = parse_and_visit(
-        &preprocessed.source,
-        JsParseMode::Module,
-        |program| js_walk::walk_script_passage(program, &preprocessed),
-    );
+    let (outcome, analysis) =
+        parse_and_visit(&preprocessed.source, JsParseMode::Module, |program| {
+            js_walk::walk_script_passage(program, &preprocessed)
+        });
     let mut analysis = analysis.unwrap_or_default();
     analysis.diagnostics = outcome.diagnostics;
     passage_ast.script_js_analysis = Some(analysis);

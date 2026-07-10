@@ -1,0 +1,11 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..   8) Markup(InlineStyle)                           body=None | "@@class;"
+  [   8..  16) Markup(Link)                                  body=None | "[[link]]"
+  [  16..  18) Markup(InlineStyle)                           body=None | "@@"
+
+=== Bodies ===
+  (none)

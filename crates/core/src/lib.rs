@@ -26,7 +26,9 @@ pub use passage::{Block, Link, Passage, PassageCategory, SpecialPassageBehavior,
 pub use types::{BodyRequirement, MacroKind};
 pub use workspace::DocumentUpdateResult;
 pub use workspace::Workspace;
-pub use zoning::{ErrorKind, LeafKind, LeafZone, MacroBody, MarkupKind, RawLanguage, TagPart, ZoneMap};
+pub use zoning::{
+    ErrorKind, LeafKind, LeafZone, MacroBody, MarkupKind, RawLanguage, TagPart, ZoneMap,
+};
 
 #[cfg(test)]
 mod analysis_tests;

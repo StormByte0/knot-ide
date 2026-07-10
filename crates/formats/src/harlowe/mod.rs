@@ -1981,8 +1981,13 @@ mod tests {
     #[test]
     fn parse_passage_tagged_header() {
         let mut plugin = HarlowePlugin::new();
-        let result =
-            plugin.parse_passage_mut("Nav", &["header".to_string()], "Some header content\n", "", 0);
+        let result = plugin.parse_passage_mut(
+            "Nav",
+            &["header".to_string()],
+            "Some header content\n",
+            "",
+            0,
+        );
         let p = &result
             .expect("tagged [header] passage should be classified as special")
             .passages[0];

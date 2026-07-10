@@ -21,9 +21,9 @@
 //! new API parses once and runs the visitor inline, eliminating the
 //! double-parse without retaining any AST state.
 
-use super::types::{JsDiagnostic, JsDiagnosticSeverity, JsParseOutcome, ParseMode};
 #[cfg(test)]
 use super::types::record_parse_call;
+use super::types::{JsDiagnostic, JsDiagnosticSeverity, JsParseOutcome, ParseMode};
 use oxc_ast::ast::Program;
 
 /// Parse JavaScript source text with Oxc, returning only diagnostics.
@@ -125,7 +125,11 @@ pub fn parse_js(source: &str, mode: ParseMode) -> JsParseOutcome {
 /// assert!(outcome.is_clean());
 /// assert_eq!(body_len, Some(1));
 /// ```
-pub fn parse_and_visit<F, R>(source: &str, mode: ParseMode, visitor: F) -> (JsParseOutcome, Option<R>)
+pub fn parse_and_visit<F, R>(
+    source: &str,
+    mode: ParseMode,
+    visitor: F,
+) -> (JsParseOutcome, Option<R>)
 where
     F: FnOnce(&Program<'_>) -> R,
 {
@@ -300,11 +304,9 @@ mod tests {
 
     #[test]
     fn test_parse_and_visit_walks_ast() {
-        let (outcome, body_len) = parse_and_visit(
-            "var x = 42;",
-            ParseMode::Module,
-            |program| program.body.len(),
-        );
+        let (outcome, body_len) = parse_and_visit("var x = 42;", ParseMode::Module, |program| {
+            program.body.len()
+        });
         assert!(outcome.is_clean(), "Expected clean parse");
         assert!(
             body_len.unwrap_or(0) > 0,
@@ -371,11 +373,10 @@ mod tests {
         // the visitor is not called.
         //
         // For a non-panicking input, verify the visitor IS called.
-        let (outcome, visitor_result) = parse_and_visit(
-            "var x = 1;",
-            ParseMode::Module,
-            |program| program.body.len(),
-        );
+        let (outcome, visitor_result) =
+            parse_and_visit("var x = 1;", ParseMode::Module, |program| {
+                program.body.len()
+            });
         assert!(!outcome.panicked, "Should not have panicked");
         assert!(visitor_result.is_some(), "Visitor should have been called");
     }

@@ -1,0 +1,18 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..  13) MacroTag(Open name=switch kind=Container)     body=None | "<<switch $x>>"
+  [  13..  23) MacroTag(Open name=case kind=SubMacro)        body=0 | "<<case 1>>"
+  [  23..  24) Prose                                         body=1 | "a"
+  [  24..  33) MacroTag(Close name=case kind=SubMacro)       body=0 | "<</case>>"
+  [  33..  44) MacroTag(Open name=default kind=SubMacro)     body=0 | "<<default>>"
+  [  44..  45) Prose                                         body=2 | "b"
+  [  45..  57) MacroTag(Close name=default kind=SubMacro)    body=0 | "<</default>>"
+  [  57..  68) MacroTag(Close name=switch kind=Container)    body=None | "<</switch>>"
+
+=== Bodies ===
+  [0] [  13..  57) name=switch       depth=0 parent=None close=[57..68)
+  [1] [  23..  24) name=case         depth=1 parent=0 close=[24..33)
+  [2] [  44..  45) name=default      depth=1 parent=0 close=[45..57)

@@ -345,7 +345,10 @@ impl ZoneMap {
                         .map(|k| format!("{:?}", k))
                         .unwrap_or_else(|| "Unknown".to_string());
                     let orphan_str = if *orphan { " [orphan]" } else { "" };
-                    format!("MacroTag({:?} name={} kind={}{})", part, macro_name, kind_str, orphan_str)
+                    format!(
+                        "MacroTag({:?} name={} kind={}{})",
+                        part, macro_name, kind_str, orphan_str
+                    )
                 }
                 LeafKind::Raw { language } => format!("Raw({:?})", language),
                 LeafKind::Error { message, kind } => {
@@ -382,7 +385,15 @@ impl ZoneMap {
                 let unclosed_str = if body.unclosed { " [unclosed]" } else { "" };
                 out.push_str(&format!(
                     "  [{}] [{:4}..{:4}) name={:<12} depth={} {} close={}{}{}\n",
-                    i, body.span.start, body.span.end, body.macro_name, body.depth, parent_str, close_str, raw_str, unclosed_str
+                    i,
+                    body.span.start,
+                    body.span.end,
+                    body.macro_name,
+                    body.depth,
+                    parent_str,
+                    close_str,
+                    raw_str,
+                    unclosed_str
                 ));
             }
         }

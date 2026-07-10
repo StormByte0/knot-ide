@@ -1,0 +1,11 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..  12) MacroTag(Open name=myWidget kind=Container)   body=None | "<<myWidget>>"
+  [  12..  16) Prose                                         body=0 | "body"
+  [  16..  29) MacroTag(Close name=myWidget kind=Container)  body=None | "<</myWidget>>"
+
+=== Bodies ===
+  [0] [  12..  16) name=myWidget     depth=0 parent=None close=[16..29)

@@ -2538,7 +2538,10 @@ impl SugarCubePlugin {
         let body_macros = self.body_macro_names();
         let enclosing: Vec<String> = {
             let zone_result = if let Some(doc) = workspace.get_document(uri) {
-                let passage = doc.passages.iter().find(|p| p.contains_abs_offset(byte_offset));
+                let passage = doc
+                    .passages
+                    .iter()
+                    .find(|p| p.contains_abs_offset(byte_offset));
                 if let Some(passage) = passage {
                     let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
                     passage
@@ -2631,12 +2634,8 @@ impl SugarCubePlugin {
             if let Some(forms) = macros::macro_completion_forms(mdef.name) {
                 for form in forms {
                     let snippet = macros::convert_snippet_newlines(form.snippet);
-                    let text_edit = compute_macro_text_edit(
-                        filter_prefix,
-                        cursor,
-                        &snippet,
-                        after_cursor,
-                    );
+                    let text_edit =
+                        compute_macro_text_edit(filter_prefix, cursor, &snippet, after_cursor);
                     let detail_text = if mdef.deprecated {
                         format!("[Deprecated] [{}] {}", category, form.detail)
                     } else {
@@ -2720,12 +2719,8 @@ impl SugarCubePlugin {
                     "{} $1>>\\n$2\\n<</{}>>",
                     name, name
                 ));
-                let block_text_edit = compute_macro_text_edit(
-                    filter_prefix,
-                    cursor,
-                    &block_snippet,
-                    after_cursor,
-                );
+                let block_text_edit =
+                    compute_macro_text_edit(filter_prefix, cursor, &block_snippet, after_cursor);
                 let block_detail = if let Some(desc) = description {
                     format!("{} (container) — {}", name, desc)
                 } else {
@@ -2751,12 +2746,8 @@ impl SugarCubePlugin {
                     "{} $1>>\\n$2\\n<</{}>>",
                     name, name
                 ));
-                let block_text_edit = compute_macro_text_edit(
-                    filter_prefix,
-                    cursor,
-                    &block_snippet,
-                    after_cursor,
-                );
+                let block_text_edit =
+                    compute_macro_text_edit(filter_prefix, cursor, &block_snippet, after_cursor);
                 let block_detail = if let Some(desc) = description {
                     format!("{} (with body) — {}", name, desc)
                 } else {
@@ -2799,12 +2790,8 @@ impl SugarCubePlugin {
                 } else {
                     format!("{} {}>>", name, arg_placeholder)
                 };
-                let inline_text_edit = compute_macro_text_edit(
-                    filter_prefix,
-                    cursor,
-                    &inline_snippet,
-                    after_cursor,
-                );
+                let inline_text_edit =
+                    compute_macro_text_edit(filter_prefix, cursor, &inline_snippet, after_cursor);
                 let inline_detail = if let Some(desc) = description {
                     format!("{} (inline) — {}", name, desc)
                 } else {
@@ -3589,7 +3576,17 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 0, character: 2 }, text, 2);
+        let items = plugin.build_macro_completions(
+            &workspace,
+            &uri,
+            "",
+            CursorPos {
+                line: 0,
+                character: 2,
+            },
+            text,
+            2,
+        );
         assert!(
             !items.is_empty(),
             "build_macro_completions returned {} items, expected > 0",
@@ -4959,7 +4956,17 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
+        let items = plugin.build_macro_completions(
+            &workspace,
+            &uri,
+            "",
+            CursorPos {
+                line: 1,
+                character: 4,
+            },
+            text,
+            4,
+        );
         let inline = items
             .iter()
             .find(|i| i.insert_text.as_deref() == Some("mywidget ${1:arg1} ${2:arg2}>>"))
@@ -4981,7 +4988,17 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
+        let items = plugin.build_macro_completions(
+            &workspace,
+            &uri,
+            "",
+            CursorPos {
+                line: 1,
+                character: 4,
+            },
+            text,
+            4,
+        );
         // Find the inline form (label is `<<mywidget>>` without `...<</mywidget>>`)
         let inline = items
             .iter()
@@ -5009,7 +5026,17 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
+        let items = plugin.build_macro_completions(
+            &workspace,
+            &uri,
+            "",
+            CursorPos {
+                line: 1,
+                character: 4,
+            },
+            text,
+            4,
+        );
         let inline = items
             .iter()
             .find(|i| i.label == "<<nowidget>>" && !i.label.contains("</"))
@@ -5032,7 +5059,17 @@ mod completion_debug_tests {
         let uri = Url::parse("file:///test.twee").unwrap();
         let workspace = Workspace::new(uri.clone());
 
-        let items = plugin.build_macro_completions(&workspace, &uri, "", CursorPos { line: 1, character: 4 }, text, 4);
+        let items = plugin.build_macro_completions(
+            &workspace,
+            &uri,
+            "",
+            CursorPos {
+                line: 1,
+                character: 4,
+            },
+            text,
+            4,
+        );
         let item = items
             .iter()
             .find(|i| i.label == "<<mymacro>>")
@@ -6130,7 +6167,17 @@ mod phase4_zone_completion_tests {
         text: &str,
         byte_offset: usize,
     ) -> Vec<String> {
-        let items = plugin.build_macro_completions(workspace, uri, "", CursorPos { line: 0, character: 0 }, text, byte_offset);
+        let items = plugin.build_macro_completions(
+            workspace,
+            uri,
+            "",
+            CursorPos {
+                line: 0,
+                character: 0,
+            },
+            text,
+            byte_offset,
+        );
         items.iter().map(|i| i.label.clone()).collect()
     }
 
@@ -6176,7 +6223,9 @@ mod phase4_zone_completion_tests {
         let cursor_offset = src.find("  <<").unwrap() + 4;
         let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
         assert!(
-            labels.iter().any(|l| l == "<<case>>" || l.starts_with("<<case ")),
+            labels
+                .iter()
+                .any(|l| l == "<<case>>" || l.starts_with("<<case ")),
             "<<case>> should be offered inside <<switch>> body, got: {:?}",
             labels
         );
@@ -6190,7 +6239,9 @@ mod phase4_zone_completion_tests {
         let cursor_offset = src.find("  <<").unwrap() + 4;
         let labels = macro_completion_labels(&plugin, &workspace, &uri, src, cursor_offset);
         assert!(
-            !labels.iter().any(|l| l == "<<case>>" || l.starts_with("<<case ")),
+            !labels
+                .iter()
+                .any(|l| l == "<<case>>" || l.starts_with("<<case ")),
             "<<case>> should NOT be offered inside <<if>> (wrong parent), got: {:?}",
             labels
         );
@@ -6265,7 +6316,9 @@ mod phase4_zone_completion_tests {
         // `<<set $var to value>>` (snippet form), so we check for `<<set`.
         for expected in &["set", "print", "if", "link", "for"] {
             assert!(
-                labels.iter().any(|l| l.starts_with(&format!("<<{}", expected))),
+                labels
+                    .iter()
+                    .any(|l| l.starts_with(&format!("<<{}", expected))),
                 "<<{}>> should be offered at top level, got: {:?}",
                 expected,
                 labels

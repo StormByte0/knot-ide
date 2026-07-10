@@ -242,9 +242,7 @@ pub(crate) async fn send_lsp_diagnostics(
     prebuilt: Vec<(Url, Vec<Diagnostic>)>,
 ) {
     for (uri, lsp_diagnostics) in prebuilt {
-        client
-            .publish_diagnostics(uri, lsp_diagnostics, None)
-            .await;
+        client.publish_diagnostics(uri, lsp_diagnostics, None).await;
     }
 }
 

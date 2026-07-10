@@ -1,0 +1,10 @@
+---
+source: crates/formats/src/zoning.rs
+expression: zones.debug_dump(&body)
+---
+=== Leaves ===
+  [   0..  15) MacroTag(Open name=set kind=Inline)           body=None | "<<set $x to 1>>"
+  [  15..  20) Prose                                         body=None | " text"
+
+=== Bodies ===
+  (none)

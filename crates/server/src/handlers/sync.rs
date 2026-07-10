@@ -352,7 +352,14 @@ pub fn did_change_phase1(
     // path (single-passage `ParseResult`) or the full re-parse path (all
     // passages). M3 uses this to decide between merging the result into the
     // existing cache (incremental) vs replacing the whole cache (full).
-    let (mut doc, parse_result, was_incremental, is_panic_degraded, panicked_passage_name, dispatch) = match &impact {
+    let (
+        mut doc,
+        parse_result,
+        was_incremental,
+        is_panic_degraded,
+        panicked_passage_name,
+        dispatch,
+    ) = match &impact {
         helpers::EditImpact::WithinPassage {
             passage_name,
             in_passage_range: _,
@@ -376,11 +383,19 @@ pub fn did_change_phase1(
             ) {
                 Some((doc, parse_result, panicked)) => {
                     let dispatch = if panicked {
-                        DidChangeDispatch::IncrementalPanic { passage_name: passage_name.clone() }
+                        DidChangeDispatch::IncrementalPanic {
+                            passage_name: passage_name.clone(),
+                        }
                     } else {
-                        DidChangeDispatch::Incremental { passage_name: passage_name.clone() }
+                        DidChangeDispatch::Incremental {
+                            passage_name: passage_name.clone(),
+                        }
                     };
-                    let panicked_name = if panicked { Some(passage_name.clone()) } else { None };
+                    let panicked_name = if panicked {
+                        Some(passage_name.clone())
+                    } else {
+                        None
+                    };
                     (doc, parse_result, true, panicked, panicked_name, dispatch)
                 }
                 None => {
@@ -398,7 +413,14 @@ pub fn did_change_phase1(
                         format.clone(),
                         version,
                     );
-                    (doc, parse_result, false, false, None, DidChangeDispatch::IncrementalFallback)
+                    (
+                        doc,
+                        parse_result,
+                        false,
+                        false,
+                        None,
+                        DidChangeDispatch::IncrementalFallback,
+                    )
                 }
             }
         }
@@ -456,9 +478,7 @@ pub fn did_change_phase1(
             // Find the edited passage's old offset from doc_before.
             let edited_name = match &dispatch {
                 DidChangeDispatch::Incremental { passage_name }
-                | DidChangeDispatch::IncrementalPanic { passage_name } => {
-                    passage_name.as_str()
-                }
+                | DidChangeDispatch::IncrementalPanic { passage_name } => passage_name.as_str(),
                 _ => "",
             };
             let edited_offset = doc_before
@@ -470,8 +490,7 @@ pub fn did_change_phase1(
                 // 1. Fix up passage_offset on doc.passages
                 for p in doc.passages.iter_mut() {
                     if p.passage_offset > edited_offset {
-                        p.passage_offset =
-                            ((p.passage_offset as isize) + delta) as usize;
+                        p.passage_offset = ((p.passage_offset as isize) + delta) as usize;
                     }
                 }
 
@@ -510,10 +529,7 @@ pub fn did_change_phase1(
     if was_incremental {
         // Incremental path: merge the single-passage result into the existing
         // cache entry. Other passages' groups are untouched.
-        let existing = inner
-            .format_diagnostics
-            .entry(uri.clone())
-            .or_default();
+        let existing = inner.format_diagnostics.entry(uri.clone()).or_default();
         helpers::merge_incremental_diagnostics(existing, &parse_result);
     } else {
         // Full re-parse path: replace the whole per-URI cache entry.
@@ -529,10 +545,7 @@ pub fn did_change_phase1(
         // cache entry. On panic-degraded mode, the panicked passage's tokens
         // are removed (no tokens emitted for broken JS); other passages'
         // tokens are untouched.
-        let existing = inner
-            .semantic_tokens
-            .entry(uri.clone())
-            .or_default();
+        let existing = inner.semantic_tokens.entry(uri.clone()).or_default();
         helpers::merge_incremental_tokens(
             existing,
             &parse_result,
@@ -594,7 +607,11 @@ pub fn did_change_phase1(
         inner.workspace.graph.edge_count()
     );
 
-    DidChangePhase1Result { uri, version, dispatch }
+    DidChangePhase1Result {
+        uri,
+        version,
+        dispatch,
+    }
 }
 
 /// Phase 2 of `did_change`: the synchronous read-lock analysis core.
@@ -615,8 +632,7 @@ pub fn did_change_phase2(
     inner: &crate::state::ServerStateInner,
     uri: &url::Url,
 ) -> Vec<(url::Url, Vec<lsp_types::Diagnostic>)> {
-    let diagnostics =
-        helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
+    let diagnostics = helpers::analyze_with_format_vars(&inner.workspace, &inner.format_registry);
     tracing::trace!(
         file = %uri,
         diagnostic_count = diagnostics.len(),
@@ -684,7 +700,10 @@ fn did_change_incremental(
     let doc_before = doc_before?;
 
     // Find the edited passage in the pre-edit document.
-    let old_passage_idx = doc_before.passages.iter().position(|p| p.name == passage_name)?;
+    let old_passage_idx = doc_before
+        .passages
+        .iter()
+        .position(|p| p.name == passage_name)?;
     let old_passage = &doc_before.passages[old_passage_idx];
     let old_passage_offset = old_passage.passage_offset;
     let passage_tags = old_passage.tags.clone();
@@ -833,11 +852,7 @@ fn did_change_incremental(
             }
 
             // Build a diagnostic group for the panicked passage.
-            let error_group = helpers::replace_passage_with_error(
-                doc_before,
-                passage_name,
-                &msg,
-            );
+            let error_group = helpers::replace_passage_with_error(doc_before, passage_name, &msg);
 
             // The ParseResult contains only the panicked passage's
             // diagnostic group (no token groups — the plugin panicked
@@ -857,10 +872,7 @@ fn did_change_incremental(
                         passage_offset: passage_offset_new,
                         diagnostics: vec![knot_formats::plugin::FormatDiagnostic {
                             range: 0..1,
-                            message: format!(
-                                "Internal error: passage parse panicked — {}",
-                                msg
-                            ),
+                            message: format!("Internal error: passage parse panicked — {}", msg),
                             severity: knot_formats::plugin::FormatDiagnosticSeverity::Error,
                             code: "sc-parse".to_string(),
                         }],
@@ -1088,7 +1100,8 @@ pub(crate) async fn did_change_watched_files(
                             &inner.workspace,
                             &inner.format_registry,
                         );
-                        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+                        let sigils =
+                            helpers::compute_sigils(&inner.format_registry, &inner.workspace);
                         helpers::build_all_lsp_diagnostics(
                             &diagnostics,
                             &inner.format_diagnostics,
@@ -1221,7 +1234,8 @@ pub(crate) async fn did_change_watched_files(
                             &inner.workspace,
                             &inner.format_registry,
                         );
-                        let sigils = helpers::compute_sigils(&inner.format_registry, &inner.workspace);
+                        let sigils =
+                            helpers::compute_sigils(&inner.format_registry, &inner.workspace);
                         helpers::build_all_lsp_diagnostics(
                             &diagnostics,
                             &inner.format_diagnostics,
@@ -1421,8 +1435,7 @@ mod tests {
         };
 
         // Build the workspace with the parsed document.
-        let mut workspace =
-            knot_core::Workspace::new(url::Url::parse("file:///project/").unwrap());
+        let mut workspace = knot_core::Workspace::new(url::Url::parse("file:///project/").unwrap());
         // Force SugarCube (no StoryData passage in test fixtures).
         workspace.config.format = Some("SugarCube".to_string());
         let mut doc = knot_core::Document::new(uri.clone(), StoryFormat::SugarCube);
@@ -1783,8 +1796,7 @@ mod tests {
             second_diags_before.passage_offset, second_diags_after.passage_offset
         );
         assert_eq!(
-            second_tokens_after.passage_offset,
-            second_diags_after.passage_offset,
+            second_tokens_after.passage_offset, second_diags_after.passage_offset,
             "Token and diagnostic groups should have the same passage_offset"
         );
     }

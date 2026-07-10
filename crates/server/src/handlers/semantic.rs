@@ -3,6 +3,7 @@
 
 use crate::handlers::helpers;
 use crate::state::ServerState;
+use knot_core::AnalysisEngine;
 use knot_formats::plugin as fmt_plugin;
 use lsp_types::*;
 
@@ -552,6 +553,33 @@ pub(crate) async fn code_lens(
         return Ok(None);
     };
 
+    // ── Dataflow analysis for "init:" variable hints ───────────────────
+    // Run once for the whole document so we can annotate each passage's
+    // code lens with the variables available at passage entry. Truncated
+    // to 5 names to avoid overwhelming the lens.
+    let start_passage = inner
+        .workspace
+        .metadata
+        .as_ref()
+        .map(|m| m.start_passage.as_str())
+        .unwrap_or("Start");
+    let passage_data = AnalysisEngine::collect_passage_data(&inner.workspace);
+    let core_seed =
+        AnalysisEngine::collect_special_passage_initializers(&inner.workspace, &passage_data);
+    let format = inner.workspace.resolve_format();
+    let seed_init = helpers::supplement_seed_with_format_specials(
+        core_seed,
+        &inner.workspace,
+        &inner.format_registry,
+        format,
+    );
+    let flow_states = AnalysisEngine::run_dataflow_from_engine(
+        &inner.workspace,
+        start_passage,
+        &passage_data,
+        &seed_init,
+    );
+
     let mut lenses = Vec::new();
 
     for passage in &doc.passages {
@@ -562,8 +590,31 @@ pub(crate) async fn code_lens(
             .len();
         let incoming = helpers::count_incoming_links(&inner.workspace, &passage.name);
 
-        if outgoing > 0 || incoming > 0 {
-            // Compute range from the passage header line using span data
+        // Build the init-vars suffix: "  init: $a, $b, $c" (truncated to 5).
+        let init_suffix = flow_states
+            .get(&passage.name)
+            .map(|fs| {
+                let mut init_vars: Vec<&String> = fs.entry.iter().collect();
+                init_vars.sort();
+                if init_vars.is_empty() {
+                    String::new()
+                } else {
+                    let display_count = init_vars.len().min(5);
+                    let names: Vec<&str> = init_vars[..display_count]
+                        .iter()
+                        .map(|v| v.as_str())
+                        .collect();
+                    let more = if init_vars.len() > 5 {
+                        format!(", … +{}", init_vars.len() - 5)
+                    } else {
+                        String::new()
+                    };
+                    format!("  init: {}{}", names.join(", "), more)
+                }
+            })
+            .unwrap_or_default();
+
+        if outgoing > 0 || incoming > 0 || !init_suffix.is_empty() {
             let span_start = passage.abs_offset(passage.span.start).min(text.len());
             let line_end = text[span_start..]
                 .find('\n')
@@ -571,14 +622,18 @@ pub(crate) async fn code_lens(
                 .unwrap_or(text.len());
             let range = helpers::byte_range_to_lsp_range(text, &(span_start..line_end));
 
+            let title = if outgoing > 0 {
+                format!("{} links →{}", outgoing, init_suffix)
+            } else if incoming > 0 {
+                format!("{} refs{}", incoming, init_suffix)
+            } else {
+                init_suffix.trim_start().to_string()
+            };
+
             lenses.push(CodeLens {
                 range,
                 command: Some(Command {
-                    title: if outgoing > 0 {
-                        format!("{} links →", outgoing)
-                    } else {
-                        format!("{} refs", incoming)
-                    },
+                    title,
                     command: String::new(),
                     arguments: None,
                 }),
@@ -659,7 +714,10 @@ mod document_symbol_tests {
             doc_versions: std::collections::HashMap::new(),
             semantic_tokens: {
                 let mut m = std::collections::HashMap::new();
-                m.insert(uri.clone(), crate::handlers::helpers::token_groups_to_map(parse_result.token_groups));
+                m.insert(
+                    uri.clone(),
+                    crate::handlers::helpers::token_groups_to_map(parse_result.token_groups),
+                );
                 m
             },
             installed_formats: Vec::new(),
