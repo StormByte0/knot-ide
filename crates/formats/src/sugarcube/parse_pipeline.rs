@@ -400,18 +400,39 @@ pub fn parse_single(
         ParseMode::Normal
     };
 
-    // Phase 1: Structural parse
-    let mut passage_ast = super::parser::parse_passage_body(passage_text, 0, mode);
+    // Strip the passage header line before parsing.
+    //
+    // `passage_text` (from `did_change_incremental`) starts at the passage's
+    // `::` prefix and includes the header line (e.g. `:: DomMacros [docs dom]\n`).
+    // But `parse_passage_body` expects BODY text only (after the header).
+    //
+    // If we pass the full text including `::`, the parser treats `::` as the
+    // first 2 bytes of prose, shifting ALL zone spans by the header length.
+    // This causes the formatter to slice wrong portions of the body, producing
+    // cascading corruption on repeated format calls.
+    //
+    // We find the header line end (the first `\n`) and pass only the body.
+    // The `body_offset_in_passage` is set to the header length so zone spans
+    // are correctly relative to the passage head (`::`), matching what
+    // `parse_full` produces.
+    let header_line_end = passage_text
+        .find('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(passage_text.len());
+    let body_text = &passage_text[header_line_end..];
+    let body_offset_in_passage = header_line_end;
+
+    // Phase 1: Structural parse — parse BODY text only (no :: header)
+    let mut passage_ast = super::parser::parse_passage_body(body_text, body_offset_in_passage, mode);
 
     // Phase 1b: Build the unified zone map (zoning engine).
-    // In parse_single, body_offset_in_passage = 0 (passage-relative spans
-    // are built directly; the caller sets passage_offset for document-absolute
-    // wire conversion at the LSP boundary).
+    // body_offset_in_passage shifts zone spans from body-relative to
+    // passage-relative (0 = `::`), matching what `parse_full` produces.
     if matches!(mode, ParseMode::Normal | ParseMode::Widget | ParseMode::Interface) {
         let registry = plugin.registry();
         passage_ast.zones = crate::zoning::build_from_ast(
             &passage_ast.nodes,
-            0,
+            body_offset_in_passage,
             registry.custom_macros(),
         );
     }
@@ -428,7 +449,7 @@ pub fn parse_single(
         }
         super::js::js_annotate::annotate_js(
             &mut passage_ast,
-            passage_text,
+            body_text,
             mode == ParseMode::Script,
             // Incremental re-parse of a single Twee passage — SugarCube syntax
             // is always allowed.
@@ -466,7 +487,7 @@ pub fn parse_single(
     };
     let cp = ClassifiedPassage {
         header,
-        body_text: passage_text.to_string(),
+        body_text: body_text.to_string(),
         file_uri: file_uri.to_string(),
         category: classifier::PassageCategory::Regular,
         special_def,
@@ -474,10 +495,9 @@ pub fn parse_single(
     };
 
     // Build the Passage struct (passage-relative spans, passage_head = 0).
-    // body_offset_in_passage = 0 because parse_single builds passage-relative
-    // spans internally; the caller sets passage_offset for document-absolute
-    // wire conversion at the LSP boundary.
-    let mut passage = passage_build::build_passage(&cp, &passage_ast, 0, 0);
+    // body_offset_in_passage = header_line_end (the offset of the body
+    // within the passage, after the `:: Name` header line).
+    let mut passage = passage_build::build_passage(&cp, &passage_ast, body_offset_in_passage, 0);
     passage.span = 0..passage_text.len();
     // Set the document-absolute passage_offset from the caller's param.
     // All other spans (links, vars, blocks) remain passage-relative (0 = `::`).
@@ -489,10 +509,9 @@ pub fn parse_single(
         Some(cp.header.name_start..cp.header.name_start + cp.header.name.len());
 
     // Override vars with unified AST vars (includes js_analysis + script_js_analysis)
-    passage.vars = passage_build::build_vars_from_unified_ast(&passage_ast, 0);
+    passage.vars = passage_build::build_vars_from_unified_ast(&passage_ast, body_offset_in_passage);
 
     // Phase 3: Registry mutation — clear old passage data, then populate.
-    let body_offset_in_passage: usize = 0;
     {
         let registry = plugin.registry_mut();
         registry.remove_passage(passage_name);

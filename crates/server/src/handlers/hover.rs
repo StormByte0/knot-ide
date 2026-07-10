@@ -649,8 +649,8 @@ fn try_close_tag_hover(
     // hasn't recognized it yet).
     if let Some(passage) = passage {
         let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
-        if let Some(leaf) = passage.zones.leaf_at(passage_offset) {
-            if let knot_core::zoning::LeafKind::MacroTag {
+        if let Some(leaf) = passage.zones.leaf_at(passage_offset)
+            && let knot_core::zoning::LeafKind::MacroTag {
                 macro_name,
                 part: knot_core::zoning::TagPart::Close,
                 ..
@@ -676,7 +676,6 @@ fn try_close_tag_hover(
                     });
                 }
             }
-        }
     }
 
     // ── Fallback: line-based backward scan for mid-typing cases ─────
@@ -1859,8 +1858,8 @@ fn try_block_markup_hover(
     // may not be at column 0).
     if let Some(passage) = passage {
         let passage_offset = byte_offset.saturating_sub(passage.passage_offset);
-        if let Some(leaf) = passage.zones.leaf_at(passage_offset) {
-            if let knot_core::zoning::LeafKind::Markup(kind) = &leaf.kind {
+        if let Some(leaf) = passage.zones.leaf_at(passage_offset)
+            && let knot_core::zoning::LeafKind::Markup(kind) = &leaf.kind {
                 // Build hover text from the markup kind. We need to extract
                 // the marker text from the source to get the level/depth.
                 let abs_span = passage.abs_range(&leaf.span);
@@ -1876,7 +1875,6 @@ fn try_block_markup_hover(
                     });
                 }
             }
-        }
     }
 
     // ── Fallback: line-based column-0 detection ─────────────────────

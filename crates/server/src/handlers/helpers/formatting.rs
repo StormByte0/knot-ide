@@ -4,6 +4,59 @@ use lsp_types::*;
 
 use super::position::utf16_len;
 
+/// Compute the LSP Range that covers the ENTIRE document text, including
+/// any trailing newline.
+///
+/// This is critical: if the range does not cover the trailing newline,
+/// VS Code will NOT treat the edit as a full-document replacement.
+/// Instead, it will send a `didChange` notification with many small
+/// incremental changes (the diff between old and new text). This triggers
+/// the incremental re-parse path in `apply_document_changes`, which can
+/// produce a different zone map than the full re-parse, causing cascading
+/// formatting corruption on repeated format calls.
+///
+/// By covering the full document (including the trailing newline), VS Code
+/// sends a single full-text replacement change, which triggers the
+/// `has_full_replace` path — a clean full re-parse.
+fn full_document_range(text: &str) -> Range {
+    let num_newlines = text.matches('\n').count() as u32;
+    let (end_line, end_char) = if text.ends_with('\n') {
+        // Text ends with \n — the end position is the start of the
+        // (empty) line after the last newline. This position represents
+        // the very end of the document.
+        (num_newlines, 0u32)
+    } else {
+        // Text does not end with \n — the end position is on the last
+        // line, at the end of its content.
+        let last_line = text.rsplit('\n').next().unwrap_or(text);
+        (num_newlines, utf16_len(last_line) as u32)
+    };
+
+    Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: end_line,
+            character: end_char,
+        },
+    }
+}
+
+/// Detect the trailing line ending of the text (if any), so the formatted
+/// output preserves the same line ending style. Returns `"\r\n"`, `"\n"`,
+/// or `""` (no trailing newline).
+fn trailing_line_ending(text: &str) -> &'static str {
+    if text.ends_with("\r\n") {
+        "\r\n"
+    } else if text.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    }
+}
+
 /// Format a Twee document: normalize headers, trim trailing whitespace,
 /// ensure blank lines between passages.
 pub(crate) fn format_twee_text(text: &str) -> Vec<TextEdit> {
@@ -78,21 +131,14 @@ pub(crate) fn format_twee_text(text: &str) -> Vec<TextEdit> {
     let original_text = text.to_string();
 
     if formatted_text != original_text {
-        // Return a single edit replacing the entire document
-        let line_count = lines.len() as u32;
-        let last_line_utf16_len = lines.last().map(|l| utf16_len(l)).unwrap_or(0);
+        // Return a single edit replacing the entire document.
+        // Use `full_document_range` to ensure the range covers the trailing
+        // newline — otherwise VS Code sends incremental changes instead of
+        // a full-text replacement, triggering the buggy incremental path.
+        let trailing = trailing_line_ending(text);
         vec![TextEdit {
-            range: Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
-                },
-                end: Position {
-                    line: line_count.saturating_sub(1),
-                    character: last_line_utf16_len,
-                },
-            },
-            new_text: formatted_text,
+            range: full_document_range(text),
+            new_text: format!("{}{}", formatted_text, trailing),
         }]
     } else {
         edits
@@ -227,21 +273,13 @@ pub(crate) fn format_twee_text_with_zones(
     let original = text.trim_end();
 
     if formatted != original {
-        let lines: Vec<&str> = text.lines().collect();
-        let line_count = lines.len().max(1) as u32;
-        let last_line_utf16_len = lines.last().map(|l| utf16_len(l)).unwrap_or(0);
+        // Use `full_document_range` to ensure the range covers the trailing
+        // newline — otherwise VS Code sends incremental changes instead of
+        // a full-text replacement, triggering the buggy incremental path.
+        let trailing = trailing_line_ending(text);
         vec![TextEdit {
-            range: Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
-                },
-                end: Position {
-                    line: line_count.saturating_sub(1),
-                    character: last_line_utf16_len,
-                },
-            },
-            new_text: formatted,
+            range: full_document_range(text),
+            new_text: format!("{}{}", formatted, trailing),
         }]
     } else {
         vec![]

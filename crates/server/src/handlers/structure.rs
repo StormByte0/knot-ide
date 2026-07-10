@@ -73,7 +73,7 @@ fn folding_range_inner(
     // We use `name_span` (the macro name in the open tag) for the start line
     // and `close_span` (the full `<</name>>` tag) for the end line. If the
     // body is unclosed (`close_span == None`), we skip it (nothing to fold).
-    if let Some(doc) = inner.workspace.get_document(&uri) {
+    if let Some(doc) = inner.workspace.get_document(uri) {
         for passage in &doc.passages {
             for body in passage.zones.iter_bodies() {
                 // Only fold bodies that have a close tag (unclosed bodies
@@ -354,14 +354,13 @@ fn signature_help_inner(
             let leaf = passage.zones.leaf_at(passage_offset);
 
             // Case 1: cursor is on a MacroTag (open or expression).
-            if let Some(leaf) = leaf {
-                if let knot_core::zoning::LeafKind::MacroTag {
+            if let Some(leaf) = leaf
+                && let knot_core::zoning::LeafKind::MacroTag {
                     macro_name: name,
                     part,
                     ..
                 } = &leaf.kind
-                {
-                    if matches!(
+                    && matches!(
                         part,
                         knot_core::zoning::TagPart::Open
                             | knot_core::zoning::TagPart::Expression
@@ -392,8 +391,6 @@ fn signature_help_inner(
                             }
                         }
                     }
-                }
-            }
 
             // Case 2: cursor is inside a macro body — walk up the stack.
             let stack = passage.zones.body_stack_at(passage_offset);

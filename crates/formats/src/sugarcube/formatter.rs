@@ -213,19 +213,18 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
         // After emitting a forced-inline open tag, start skipping whitespace
         // leaves until we hit the matching close tag. This collapses
         // `<<link>>\n<</link>>` to `<<link>><</link>>`.
-        if was_force_inline_open {
-            if let LeafKind::MacroTag { macro_name, .. } = &leaf.kind {
+        if was_force_inline_open
+            && let LeafKind::MacroTag { macro_name, .. } = &leaf.kind {
                 skipping_whitespace_for_empty_body = Some(macro_name.clone());
             }
-        }
 
         // Zone-specific: after emitting a markup marker leaf (Heading, ListItem,
         // Blockquote), normalize the space between the marker and the following
         // Prose content. The zone builder splits `!heading` into Markup(`!`) +
         // Prose(`heading`), and `!!  heading` into Markup(`!!`) + Prose(`  heading`).
         // We want exactly one space: `! heading` and `!! heading`.
-        if let LeafKind::Markup(markup_kind) = &leaf.kind {
-            if matches!(
+        if let LeafKind::Markup(markup_kind) = &leaf.kind
+            && matches!(
                 markup_kind,
                 knot_core::zoning::MarkupKind::Heading
                     | knot_core::zoning::MarkupKind::ListItem
@@ -236,8 +235,8 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
                 // may start with 0, 1, or more spaces — we normalize to exactly 1.
                 // We do this by pushing a space now and setting a flag that tells
                 // the next emit_text to strip leading spaces.
-                if let Some(next) = leaves.get(i + 1) {
-                    if matches!(next.kind, LeafKind::Prose { .. }) {
+                if let Some(next) = leaves.get(i + 1)
+                    && matches!(next.kind, LeafKind::Prose { .. }) {
                         let next_text = slice_span(body_text, &next.span);
                         // Only insert a space if the prose doesn't start with a newline
                         // (newlines mean the content is on the next line, no space needed).
@@ -248,9 +247,7 @@ pub fn format_passage(body_text: &str, zones: &ZoneMap) -> Option<String> {
                             strip_next_prose_leading_spaces = true;
                         }
                     }
-                }
             }
-        }
     }
 
     // Trim trailing whitespace from the final output (no trailing newline
@@ -666,7 +663,7 @@ fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool)
     // re-attach a single newline so the content is properly terminated.
     let owned_text;
     if depth > 0 && text.ends_with('\n') {
-        let trimmed = text.trim_end_matches(|c: char| c == '\t' || c == ' ' || c == '\n');
+        let trimmed = text.trim_end_matches(['\t', ' ', '\n']);
         if !trimmed.is_empty() && trimmed != text {
             owned_text = format!("{}\n", trimmed);
             text = &owned_text;
@@ -688,7 +685,7 @@ fn emit_text(out: &mut String, text: &str, depth: u32, at_line_start: &mut bool)
         let at_boundary = if first { *at_line_start } else { true };
 
         let normalized = if at_boundary {
-            line_content.trim_start_matches(|c: char| c == '\t' || c == ' ')
+            line_content.trim_start_matches(['\t', ' '])
         } else {
             line_content
         };

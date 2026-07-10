@@ -1498,7 +1498,7 @@ pub fn build_diagnostics(
         diagnostics,
         body_offset_in_passage,
         custom_macros,
-        &dep_macros,
+        dep_macros,
         &parent_constraints,
         &mut Vec::new(), // enclosing macro stack (outermost-first)
     );
