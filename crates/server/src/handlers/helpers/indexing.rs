@@ -406,6 +406,15 @@ pub(crate) async fn index_workspace(
 ///
 /// Returns `Some(StoryMetadata)` if a StoryData passage was found, or
 /// `None` if the file doesn't contain one.
+///
+/// Made `pub(crate)` so `did_change` can reuse it for Bug #2 (StoryData
+/// modification detection) — when the user edits StoryData, we re-scan
+/// and compare to the cached metadata to decide if a full re-index is
+/// needed.
+pub(crate) fn quick_scan_story_data_public(text: &str) -> Option<StoryMetadata> {
+    quick_scan_story_data(text)
+}
+
 fn quick_scan_story_data(text: &str) -> Option<StoryMetadata> {
     // Find the StoryData passage header
     let mut story_data_start: Option<usize> = None;

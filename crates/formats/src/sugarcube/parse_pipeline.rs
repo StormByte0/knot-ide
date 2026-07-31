@@ -488,16 +488,59 @@ pub fn parse_single(
     }
 
     // Build ClassifiedPassage for build_passage and registry population.
+    //
     // parse_single works with isolated passage text (no document context),
-    // so header_start = 0, name_start = 0.
-    let header = crate::header::TweeHeader {
-        name: passage_name.to_string(),
-        tags: passage_tags.to_vec(),
-        header_start: 0,
-        name_start: 0,
-        metadata_json: None,
-        name_text_raw: passage_name.to_string(),
-        tags_raw: String::new(),
+    // so header_start = 0. But name_start MUST be re-parsed from the actual
+    // header line — it determines where the passage-name semantic token is
+    // placed. For `::Name` (no space), name_start = 2; for `:: Name` (with
+    // space), name_start = 3.
+    //
+    // Previously this was hardcoded to 0, which placed the name token at the
+    // same offset as the `::` prefix token (offset 0). The two overlapping
+    // tokens caused VS Code to swallow the name token — the passage name
+    // lost its coloring during incremental edits (WithinPassage edits that
+    // don't trigger full re-parse). On server restart, the full parse path
+    // (parse_full) correctly set name_start via parse_twee_header, which is
+    // why coloring worked on restart but broke on edit.
+    let header = if passage_text.starts_with("::") {
+        // Re-parse the header line to get accurate name_start, tags, and
+        // metadata. passage_text starts at the passage head (::), so
+        // header_start = 0 (passage-relative).
+        let header_line_end = passage_text
+            .find('\n')
+            .unwrap_or(passage_text.len());
+        let header_line = &passage_text[..header_line_end];
+        match crate::header::parse_twee_header(header_line, 0) {
+            Some(parsed) => parsed,
+            None => {
+                // Header didn't parse — fall back to the old hardcoded
+                // values. This is defensive; parse_twee_header should
+                // always succeed for a valid passage (the caller already
+                // verified the header via did_change_incremental's
+                // header-stability check).
+                crate::header::TweeHeader {
+                    name: passage_name.to_string(),
+                    tags: passage_tags.to_vec(),
+                    header_start: 0,
+                    name_start: 0,
+                    metadata_json: None,
+                    name_text_raw: passage_name.to_string(),
+                    tags_raw: String::new(),
+                }
+            }
+        }
+    } else {
+        // Body-only text (no :: prefix) — caller passed body text directly.
+        // Use the old hardcoded values.
+        crate::header::TweeHeader {
+            name: passage_name.to_string(),
+            tags: passage_tags.to_vec(),
+            header_start: 0,
+            name_start: 0,
+            metadata_json: None,
+            name_text_raw: passage_name.to_string(),
+            tags_raw: String::new(),
+        }
     };
     let cp = ClassifiedPassage {
         header,

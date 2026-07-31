@@ -105,7 +105,16 @@ pub(crate) async fn did_open(state: &ServerState, params: DidOpenTextDocumentPar
         helpers::token_groups_to_map(parse_result.token_groups.clone()),
     );
 
-    // Insert the parsed document into the workspace.
+    // Insert the parsed document into the workspace — but ONLY if it's
+    // inside the workspace root.
+    //
+    // Files opened from outside the workspace (e.g. a reference `.twee`
+    // file from another project) are still parsed and cached for
+    // per-file LSP features (syntax highlighting, hover, completion
+    // within that file), but their passages do NOT enter the workspace
+    // graph. This prevents an unrelated file from polluting the project
+    // with phantom passages, which would cause spurious "duplicate
+    // passage name" diagnostics and stale broken-link reports (Bug #4).
     //
     // NOTE: StoryData metadata extraction does NOT belong here. Format
     // identification is the sole responsibility of the indexing pipeline
@@ -114,42 +123,50 @@ pub(crate) async fn did_open(state: &ServerState, params: DidOpenTextDocumentPar
     // the already-resolved format and inserts the document. StoryData
     // passages are kept as blocks for AST token highlighting only — any
     // changes to StoryData content should prompt a server restart.
-    inner.workspace.insert_document(doc);
+    let in_workspace = helpers::is_uri_in_workspace(&uri, &inner.workspace.root_uri);
+    if in_workspace {
+        inner.workspace.insert_document(doc);
 
-    tracing::info!(
-        passage_count = inner.workspace.get_document(&uri)
-            .map(|d| d.passages.len()).unwrap_or(0),
-        passages = ?inner.workspace.get_document(&uri)
-            .map(|d| d.passages.iter().map(|p| format!("{}(links={},vars={},special={})",
-                p.name, p.links.len(), p.vars.len(), p.is_special)).collect::<Vec<_>>())
-            .unwrap_or_default(),
-        "did_open: passages defined"
-    );
+        tracing::info!(
+            passage_count = inner.workspace.get_document(&uri)
+                .map(|d| d.passages.len()).unwrap_or(0),
+            passages = ?inner.workspace.get_document(&uri)
+                .map(|d| d.passages.iter().map(|p| format!("{}(links={},vars={},special={})",
+                    p.name, p.links.len(), p.vars.len(), p.is_special)).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            "did_open: passages defined"
+        );
 
-    // The format is resolved by the indexing pipeline — did_open never
-    // changes it. Rebuild the graph with the current (frozen) format.
-    //
-    // Wrap graph rebuild and analysis in catch_unwind to prevent panics
-    // in format plugin code (e.g., stale arena pointers in variable tree
-    // traversal) from crashing the server. This mirrors the catch_unwind
-    // already applied to parse_with_format_plugin.
-    let format = inner.workspace.resolve_format();
-    let graph_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        helpers::rebuild_graph(&inner.workspace, &inner.format_registry, format)
-    }));
-    match &graph_result {
-        Ok(graph) => inner.workspace.graph = graph.clone(),
-        Err(payload) => {
-            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            tracing::error!("did_open: rebuild_graph panicked for {}: {}", uri, msg);
-            // Keep the existing graph — it's stale but better than crashing
+        // The format is resolved by the indexing pipeline — did_open never
+        // changes it. Rebuild the graph with the current (frozen) format.
+        //
+        // Wrap graph rebuild and analysis in catch_unwind to prevent panics
+        // in format plugin code (e.g., stale arena pointers in variable tree
+        // traversal) from crashing the server. This mirrors the catch_unwind
+        // already applied to parse_with_format_plugin.
+        let format = inner.workspace.resolve_format();
+        let graph_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            helpers::rebuild_graph(&inner.workspace, &inner.format_registry, format)
+        }));
+        match &graph_result {
+            Ok(graph) => inner.workspace.graph = graph.clone(),
+            Err(payload) => {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                tracing::error!("did_open: rebuild_graph panicked for {}: {}", uri, msg);
+                // Keep the existing graph — it's stale but better than crashing
+            }
         }
+    } else {
+        tracing::info!(
+            file = %uri,
+            "did_open: file is outside workspace root — parsed for per-file features only, not added to graph"
+        );
     }
 
     // Release write lock before analysis — same two-phase pattern as did_change
@@ -219,6 +236,32 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
     // a `tower_lsp::Client` or async runtime.
     let phase1_result = did_change_phase1(&mut inner, uri.clone(), version, params.content_changes);
 
+    // ── Bug #2: StoryData modification detection ──────────────────────
+    //
+    // If the edited file contains a StoryData passage, re-parse its JSON
+    // body and compare to the cached workspace.metadata. If the format
+    // (or other critical fields) changed, we must trigger a full
+    // workspace re-index — otherwise the rest of the files are still
+    // parsed with the OLD format plugin, producing stale tokens,
+    // diagnostics, and graph edges.
+    //
+    // We do this BEFORE dropping the write lock so we can decide whether
+    // to reindex synchronously. The reindex itself needs the write lock
+    // and the client handle, so we hand off to the existing
+    // `knot_reindex_workspace` path by signalling via a flag.
+    //
+    // To avoid triggering a full reindex on every keystroke while the
+    // user is in the middle of typing the StoryData JSON, we ONLY
+    // trigger reindex when:
+    //   1. The file contains a parseable StoryData passage, AND
+    //   2. The parsed format differs from the cached metadata's format.
+    //
+    // If StoryData is temporarily malformed (e.g. user is mid-edit and
+    // the JSON doesn't parse yet), we silently skip — the next successful
+    // parse will pick up the change. This matches the indexing pipeline's
+    // behavior (quick_scan_story_data returns None on parse failure).
+    let needs_reindex_for_format = check_storydata_format_change(&mut inner, &uri);
+
     // ── Phase 1 complete: all state mutations are done. ──────────────
     // Release the write lock early so that read-lock handlers
     // (codeAction, documentLink, inlayHint, etc.) are not blocked while
@@ -228,6 +271,32 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
     // will catch in-flight handlers still waiting for the lock.
 
     drop(inner); // ← release write lock
+
+    // If StoryData's format changed, trigger a full re-index now.
+    //
+    // This runs AFTER dropping the write lock so we don't hold it across
+    // the (potentially slow) reindex. `knot_reindex_workspace` acquires
+    // its own write lock internally.
+    if needs_reindex_for_format {
+        tracing::info!(
+            file = %uri,
+            "did_change: StoryData format changed — triggering full workspace re-index"
+        );
+        state
+            .client
+            .log_message(
+                tower_lsp::lsp_types::MessageType::INFO,
+                "StoryData format changed — re-indexing workspace…",
+            )
+            .await;
+        let reindex_params = crate::lsp_ext::KnotReindexParams {
+            workspace_uri: String::new(),
+        };
+        let _ = state.knot_reindex_workspace(reindex_params).await;
+        // knot_reindex_workspace already publishes diagnostics + tokens,
+        // so we skip the normal phase 2/3 path below.
+        return;
+    }
 
     // ── Phase 2: read-lock — analysis + build LSP diagnostics (sync) ────
     // Task 3: phase 2 now does BOTH the analysis AND the LSP diagnostic
@@ -245,9 +314,136 @@ pub(crate) async fn did_change(state: &ServerState, params: DidChangeTextDocumen
     // `client.publish_diagnostics`.
     helpers::send_lsp_diagnostics(&state.client, prebuilt_diagnostics).await;
 
-    // Schedule a debounced semantic token refresh. Format is frozen
-    // after indexing — no format switch cascades are possible.
-    state.schedule_semantic_token_refresh().await;
+    // ── Semantic token refresh ──────────────────────────────────────────
+    //
+    // When the edit took the incremental path (WithinPassage), the token
+    // structure is unchanged — only positions shifted. VS Code's built-in
+    // delta logic handles this correctly, so a debounced refresh is fine
+    // (coalesces bursts of keystrokes into one refresh request).
+    //
+    // When the edit fell back to FULL re-parse (BoundaryCrossing,
+    // IncrementalFallback, WholeDocument), the token structure changed:
+    // new passages may have been created, passages may have been renamed
+    // or deleted, and passage-relative offsets shifted. VS Code's delta
+    // logic CANNOT handle these structural changes — it would show stale
+    // tokens (mapped to wrong positions) until the refresh arrives.
+    //
+    // This is the root cause of the "token coloring fumbling" during
+    // char-by-char typing of a new passage header (e.g. `::NewPassage`):
+    // each keystroke after the second `:` triggers a full re-parse, but
+    // the debounced 150ms refresh delays the new token structure from
+    // reaching the client. Between keystrokes, VS Code shows tokens
+    // from the PREVIOUS full re-parse, mapped via its delta logic to
+    // positions that no longer match the new document structure.
+    //
+    // Fix: send the refresh IMMEDIATELY (no debounce) when the dispatch
+    // was a full re-parse. Keep the debounce for incremental edits
+    // (WithinPassage) to avoid spamming the client during normal typing.
+    match phase1_result.dispatch {
+        DidChangeDispatch::Incremental { .. } | DidChangeDispatch::IncrementalPanic { .. } => {
+            // Incremental — token structure unchanged, debounced refresh is fine.
+            state.schedule_semantic_token_refresh().await;
+        }
+        DidChangeDispatch::IncrementalFallback
+        | DidChangeDispatch::BoundaryCrossing
+        | DidChangeDispatch::WholeDocument => {
+            // Full re-parse — token structure changed, refresh immediately.
+            state.send_semantic_token_refresh_now().await;
+        }
+    }
+}
+
+/// Check if the file at `uri` contains a StoryData passage whose format
+/// field (or other critical metadata) differs from the cached
+/// `workspace.metadata`.
+///
+/// Returns `true` if a full workspace re-index is needed to re-parse all
+/// files with the new format plugin.
+///
+/// This is the Bug #2 fix: previously, editing StoryData's `format` field
+/// had no effect — the workspace kept using the old format plugin until
+/// the server was restarted.
+pub(crate) fn check_storydata_format_change(
+    inner: &mut crate::state::ServerStateInner,
+    uri: &url::Url,
+) -> bool {
+    // Only consider files inside the workspace root — out-of-workspace
+    // files don't contribute to the project's format.
+    if !helpers::is_uri_in_workspace(uri, &inner.workspace.root_uri) {
+        return false;
+    }
+
+    // Get the post-edit text. If we don't have it cached (shouldn't happen
+    // after did_change_phase1, but defensive), skip.
+    let text = match inner.open_documents.get(uri) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    // Quick-scan for StoryData + parse JSON. Reuse the indexing pipeline's
+    // helper so we get identical semantics to initial format detection.
+    let new_metadata = match helpers::quick_scan_story_data_public(text) {
+        Some(m) => m,
+        None => return false, // No StoryData in this file, or JSON didn't parse
+    };
+
+    // Compare to cached metadata. If no cached metadata, this is the first
+    // time we see StoryData (e.g. user just added it) — reindex to apply
+    // the format.
+    let cached = match &inner.workspace.metadata {
+        Some(m) => m,
+        None => {
+            tracing::info!(
+                file = %uri,
+                new_format = ?new_metadata.format,
+                "StoryData detected but no cached metadata — reindexing to apply format"
+            );
+            return true;
+        }
+    };
+
+    // Compare the format field — this is the primary trigger for reindex
+    // because changing format requires re-parsing all files with the new
+    // plugin.
+    if new_metadata.format != cached.format {
+        tracing::info!(
+            file = %uri,
+            old_format = ?cached.format,
+            new_format = ?new_metadata.format,
+            "StoryData format changed — reindex required"
+        );
+        return true;
+    }
+
+    // Also reindex if the start passage changed — affects graph reachability
+    // analysis (unreachable-passage detection uses start as the root).
+    if new_metadata.start_passage != cached.start_passage {
+        tracing::info!(
+            file = %uri,
+            old_start = %cached.start_passage,
+            new_start = %new_metadata.start_passage,
+            "StoryData start passage changed — reindex required for graph analysis"
+        );
+        return true;
+    }
+
+    // IFID and format-version changes don't require reindex — they don't
+    // affect parsing or graph analysis. The next time the workspace is
+    // fully reindexed (e.g. server restart), they'll be picked up.
+    // Update them in-place so they're visible to features that read them
+    // (e.g. build process uses IFID).
+    if new_metadata.ifid != cached.ifid || new_metadata.format_version != cached.format_version {
+        tracing::debug!(
+            file = %uri,
+            "StoryData IFID or format-version changed — updating metadata in place (no reindex needed)"
+        );
+        if let Some(m) = inner.workspace.metadata.as_mut() {
+            m.ifid = new_metadata.ifid;
+            m.format_version = new_metadata.format_version;
+        }
+    }
+
+    false
 }
 
 /// Result of [`did_change_phase1`] — the synchronous core of `did_change`.
@@ -717,26 +913,122 @@ fn did_change_incremental(
     // Therefore: passage_offset_new == old_passage_offset.
     let passage_offset_new = old_passage_offset;
 
-    // Find the next passage's offset (post-edit). Since the edit is within
-    // one passage, the next passage's offset doesn't change either.
-    let next_passage_offset = if old_passage_idx + 1 < doc_before.passages.len() {
-        doc_before.passages[old_passage_idx + 1].passage_offset
-    } else {
-        text_after.len()
-    };
-
-    // Extract the post-edit passage text.
-    let passage_start = passage_offset_new;
-    let passage_end = next_passage_offset;
-    if passage_start > text_after.len() || passage_end > text_after.len() {
+    // ── Compute the actual end of this passage in `text_after` ──────────
+    //
+    // We CANNOT use `doc_before.passages[old_passage_idx + 1].passage_offset`
+    // for this, because that offset is from the PRE-edit parse. If the
+    // WithinPassage edit changed the passage's size (e.g. "1 + 1" → "1 +",
+    // shrinking by 2 bytes), the next passage's actual offset has shifted
+    // by the size delta. Using the stale offset would include bytes from
+    // the next passage's `::` header in this passage's text — which then
+    // breaks link extraction, span computation, and our header-stability
+    // check below.
+    //
+    // Instead, we scan `text_after` starting just after THIS passage's
+    // header line, looking for the next line that starts with `::`. That's
+    // the actual end of this passage. If no such line is found, the
+    // passage extends to EOF.
+    //
+    // This matches what the SugarCube lexer's `split_passages` does on a
+    // full parse, ensuring the incremental path sees the same passage
+    // boundaries the full parse would.
+    if passage_offset_new > text_after.len() {
         tracing::warn!(
             file = %uri,
             passage = %passage_name,
-            "did_change_incremental: passage offsets out of bounds, falling back"
+            "did_change_incremental: passage_offset beyond text_after length, falling back"
         );
         return None;
     }
-    let passage_text = &text_after[passage_start..passage_end];
+    let after_head = &text_after[passage_offset_new..];
+    let header_line_end_in_slice = after_head.find('\n').unwrap_or(after_head.len());
+    // Body starts after the first newline (or at end of slice if no newline).
+    let body_start_in_text = passage_offset_new + header_line_end_in_slice + 1;
+    let body_start_in_text = body_start_in_text.min(text_after.len());
+
+    // Scan the body for a line starting with `::`. We look for `\n::`
+    // (a newline followed by `::`) — that's the next passage header.
+    // The +1 below skips the `\n` so the header offset points at `::`.
+    let next_header_offset = if body_start_in_text < text_after.len() {
+        text_after[body_start_in_text..]
+            .find("\n::")
+            .map(|p| body_start_in_text + p + 1)
+    } else {
+        None
+    };
+    let passage_end = next_header_offset.unwrap_or(text_after.len());
+
+    let passage_text = &text_after[passage_offset_new..passage_end];
+
+    // ── Header stability check ──────────────────────────────────────────
+    //
+    // The incremental path is given the OLD passage name (from `doc_before`)
+    // and the post-edit passage text. The plugin's `parse_passage_mut` uses
+    // the passed name verbatim — it does NOT re-parse the header. So if the
+    // user edited the header (renaming, or completing a new `::` header
+    // typed character-by-character), the workspace would keep the stale
+    // name forever (Bug #1, #3, #5-rename).
+    //
+    // We must also detect when a NEW `::` header has appeared anywhere in
+    // the document, even outside this passage's text. This happens when
+    // the user types a new passage header character-by-character: each
+    // keystroke is a single char (no `::` in the inserted text), so
+    // classify_edit's `contains_passage_header_line` check on the inserted
+    // text doesn't fire. But by the time we get here, `text_after` has
+    // one more `::` line than `doc_before` did. The incremental path
+    // would never create the new passage in the workspace (Bug #1, #3).
+    //
+    // Two checks:
+    //   (a) Re-parse THIS passage's header line. If the name differs from
+    //       `passage_name`, fall back (rename case).
+    //   (b) Count `::` header lines in `text_after`. If the count differs
+    //       from `doc_before.passages.len()`, fall back (new passage
+    //       created, or existing passage header deleted).
+    let header_line_end = passage_text
+        .find('\n')
+        .unwrap_or(passage_text.len());
+    let header_line = &passage_text[..header_line_end];
+    if let Some(parsed) = knot_formats::header::parse_twee_header(header_line, 0) {
+        if parsed.name != passage_name {
+            tracing::info!(
+                file = %uri,
+                old_passage = %passage_name,
+                new_passage = %parsed.name,
+                "did_change_incremental: passage header renamed — falling back to full re-parse"
+            );
+            return None;
+        }
+    } else {
+        // Header line no longer parses as a passage header. This could
+        // mean the user deleted the `::` prefix or made the name empty.
+        // Fall back to full re-parse.
+        tracing::info!(
+            file = %uri,
+            passage = %passage_name,
+            "did_change_incremental: passage header no longer parses — falling back to full re-parse"
+        );
+        return None;
+    }
+
+    // (b) Count `::` header lines in the full post-edit text. If the count
+    // differs from the pre-edit passage count, the document structure has
+    // changed — fall back to full re-parse so the workspace graph is
+    // rebuilt correctly.
+    let post_edit_header_count = text_after
+        .lines()
+        .filter(|line| line.starts_with("::"))
+        .count();
+    let pre_edit_passage_count = doc_before.passages.len();
+    if post_edit_header_count != pre_edit_passage_count {
+        tracing::info!(
+            file = %uri,
+            passage = %passage_name,
+            pre_edit_passages = pre_edit_passage_count,
+            post_edit_headers = post_edit_header_count,
+            "did_change_incremental: passage header count changed — falling back to full re-parse"
+        );
+        return None;
+    }
 
     // Call the incremental parser.
     let incremental_result = helpers::parse_passage_incremental(
@@ -900,14 +1192,52 @@ pub(crate) async fn did_close(state: &ServerState, params: DidCloseTextDocumentP
     tracing::info!("did_close: {}", uri);
 
     let mut inner = state.inner.write().await;
-    // Remove from editor-open set only; keep text in open_documents cache
-    // so that features like find-references still work for closed files
+    // Remove from editor-open set.
     inner.editor_open_docs.remove(&uri);
     inner.format_diagnostics.remove(&uri);
+    inner.semantic_tokens.remove(&uri);
     // Clean up the version entry to prevent unbounded memory growth.
     // The version will be re-inserted with the client's authoritative
     // version if the document is re-opened.
     inner.doc_versions.remove(&uri);
+
+    // Decide whether to drop the document from the workspace graph.
+    //
+    // - Files INSIDE the workspace root stay in the graph even after the
+    //   editor tab is closed. They are still relevant project content
+    //   (graph diagnostics, broken-link checks, find-references) until
+    //   they are actually deleted from disk. When deletion happens,
+    //   `did_change_watched_files` with `FileChangeType::DELETED` will
+    //   call `remove_document_and_update_graph` and clean up properly.
+    //
+    // - Files OUTSIDE the workspace root (e.g. a reference `.twee` from
+    //   another project the user opened in this window) are dropped
+    //   immediately on close. They were only loaded for per-file LSP
+    //   features while the tab was open; their passages must not
+    //   pollute the project graph after close (Bug #5). They are not
+    //   covered by the workspace file watcher, so leaving them in the
+    //   graph would leak forever.
+    let in_workspace = helpers::is_uri_in_workspace(&uri, &inner.workspace.root_uri);
+    if !in_workspace {
+        let removed = inner.workspace.remove_document_and_update_graph(&uri);
+        if let Some(doc) = &removed {
+            tracing::info!(
+                file = %uri,
+                passage_count = doc.passages.len(),
+                "did_close: removed out-of-workspace document from graph"
+            );
+        }
+        // Also drop the cached text — there is no file watcher to
+        // invalidate it, and the user has signalled they are done with
+        // it by closing the tab.
+        inner.open_documents.remove(&uri);
+    } else {
+        tracing::debug!(
+            file = %uri,
+            "did_close: in-workspace file — keeping in graph; deletion is handled by did_change_watched_files"
+        );
+    }
+
     drop(inner);
 
     // Clear diagnostics for the closed file.

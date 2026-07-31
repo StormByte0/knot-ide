@@ -224,4 +224,34 @@ impl ServerState {
                 .await;
         });
     }
+
+    /// Send a `workspace/semanticTokens/refresh` request IMMEDIATELY,
+    /// bypassing the 150ms debounce.
+    ///
+    /// Used by `did_change` when the edit triggered a FULL re-parse
+    /// (BoundaryCrossing, IncrementalFallback, WholeDocument). In these
+    /// cases, the token structure has fundamentally changed (new passages
+    /// created, passages renamed/deleted, passage-relative offsets
+    /// shifted), and VS Code's built-in delta logic cannot handle the
+    /// change — it would show stale tokens at wrong positions until the
+    /// refresh arrives.
+    ///
+    /// Sending immediately ensures the client sees the new token
+    /// structure as soon as the server's cache is updated, eliminating
+    /// the "token coloring fumbling" during char-by-char typing of new
+    /// passage headers.
+    ///
+    /// Cancels any pending debounced refresh (set the flag to false
+    /// first) to avoid a redundant second refresh 150ms later.
+    pub async fn send_semantic_token_refresh_now(&self) {
+        // Cancel any pending debounced refresh — we're sending now, so
+        // the debounce timer's later send would be redundant.
+        self.semantic_refresh_pending.store(false, Ordering::Relaxed);
+
+        let client = self.client.clone();
+        use crate::lsp_ext::WorkspaceSemanticTokensRefreshRequest;
+        let _ = client
+            .send_request::<WorkspaceSemanticTokensRefreshRequest>(())
+            .await;
+    }
 }

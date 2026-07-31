@@ -6,7 +6,6 @@
 pub mod handlers;
 pub mod lsp_ext;
 pub mod state;
-
 use state::ServerState;
 use tower_lsp::{LspService, Server};
 
