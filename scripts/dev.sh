@@ -1,34 +1,14 @@
 #!/usr/bin/env bash
+# Debug build of the Rust LSP server with watch mode.
+# The Tauri dev loop (svelte dev + tauri dev) will be added once app/ is scaffolded.
 set -euo pipefail
 
-echo "=== Knot Dev Mode ==="
+echo "=== Knot Server Dev (watch) ==="
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
-# Build Rust server in debug mode
-echo "[1/3] Building Rust server (debug)..."
 cd "$PROJECT_ROOT"
-cargo build --manifest-path crates/server/Cargo.toml
-mkdir -p extensions/vscode/bin
-cp target/debug/knot-server extensions/vscode/bin/ 2>/dev/null || \
-cp target/debug/knot-server.exe extensions/vscode/bin/ 2>/dev/null || \
-echo "WARNING: Could not find knot-server binary"
 
-# Build webview in watch mode
-echo ""
-echo "[2/3] Starting webview dev server..."
-cd "$PROJECT_ROOT/extensions/vscode/webview"
-npm install
-npx vite build --watch &
-VITE_PID=$!
-
-# Compile extension in watch mode
-echo ""
-echo "[3/3] Starting extension compile watcher..."
-cd "$PROJECT_ROOT/extensions/vscode"
-npm install
-npx tsc -watch &
-
-echo ""
-echo "Dev servers running. Press Ctrl+C to stop."
-trap "kill $VITE_PID 2>/dev/null; wait" EXIT
-wait
+cargo watch -x 'build --manifest-path crates/server/Cargo.toml' \
+  || cargo watch -x "build --manifest-path crates/server/Cargo.toml" \
+  || { echo "cargo-watch not installed. Install with: cargo install cargo-watch"; \
+       echo "Falling back to one-shot debug build..."; \
+       cargo build --manifest-path crates/server/Cargo.toml; }
