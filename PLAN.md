@@ -26,13 +26,14 @@ to address Tweego's lack of asset bundling.
 | Editor | Monaco |
 | Frontend framework | Svelte 5 |
 | Graph renderer | svelte-flow (behind a `GraphRenderer` abstraction for future swap) |
-| Server transport | `knot-server` as subprocess (not in-process) |
+| Server transport | `knot-server` as subprocess (not in-process), bundled as a Tauri sidecar |
+| Sidecar bundling | `knot-server` and Tweego binaries bundled inside the app via Tauri `bundle.externalBin` with target-triple suffixes. Users do not install Rust or Tweego manually. |
 | VS Code extension | **Removed.** Tree purged; no maintenance burden. |
 | License trajectory | Closed source. Themes may be released under a permissive license (MIT/Apache-2.0) separately. |
 | Plugin/extension API | None. Not planned. |
 | Workspace config | `.knot/config.json`. Auto-migrate from `.vscode/knot.json` on first open with backup. |
 | Menu bar | Native (per-platform). "Check for Updates…" lives under the app menu (About on Windows/Linux). |
-| Multi-window | Yes. Parent window owns child windows; panels are detachable and movable. |
+| Multi-window | Parent window (primary workspace + native menu + app-level status bar) owns child windows. Any panel ("deck") can detach into a child window for multi-monitor use. Closing parent closes all children. |
 | Crash reporting | Mandatory local anonymized report file (machine/env/error). Opt-in cloud upload deferred until website/server exists. |
 | Auto-update | Tauri updater. "Check for Updates…" menu item. |
 | Min OS | Windows 10 1903+, macOS 11+ (Big Sur), Ubuntu 22.04+ / Fedora 36+. Same as current. |
@@ -220,14 +221,49 @@ across all passages via `knot-core` library calls.
 
 ## 6. Window model
 
-- App launches a parent window with native menu bar and system tray
-- Each panel (editor tabs, story map, inspector, asset manager, console) is
-  detachable and movable
-- "Send to new window" or drag-out creates a child window
-- Child windows are owned by the parent; closing parent closes all children
-- Closing the last window exits the app (after confirm) — equivalent to "Quit"
+### 6.1 Parent / child deck model
+
+- App launches a **parent window** containing: native menu bar, app-level
+  status bar (project name, `knot-server` health, Tweego version, build status,
+  update indicator), and the primary dockable workspace.
+- The parent workspace hosts **decks** (panels): editor tabs, Story Map,
+  Passage Inspector, Asset Manager, Variable Flow, Build/Run console, file tree.
+  Decks are dockable and rearrangeable within the parent.
+- Any deck can **detach** into a child window via "Send to New Window" or
+  drag-out. Detached decks are owned by the parent and support multi-monitor
+  (drag to any screen).
+- Child windows are owned by the parent; closing parent closes all children.
+- Closing the last window exits the app (after confirm) — equivalent to "Quit".
 - Window state (size, position, pane layout) persists in `.knot/window-state.json`
-- Presets: "Editor", "Story Map", "Asset", "Debug" + user-savable custom presets
+  via `tauri-plugin-window-state` (OS-level geometry) + a custom pane-layout
+  layer (which decks are open, dock positions, split sizes).
+- Presets: "Editor", "Story Map", "Asset", "Debug" + user-savable custom presets.
+
+### 6.2 Monaco `initialize()`-once constraint
+
+`@codingame/monaco-vscode-api`'s `initialize()` runs once per JS context. Each
+Tauri window is a separate JS context. Implications:
+
+- **Parent window**: runs `initialize()` once at startup. Editor decks docked
+  in the parent use this single init. ✓
+- **Detached non-editor decks** (Story Map, Asset Manager, Build/Run, Variable
+  Flow): do not need Monaco. No init cost. ✓
+- **Detached editor deck**: runs its own `initialize()` in the child window's
+  JS context. Cost is ~50-100ms + ~30MB memory. Acceptable because detached
+  editor windows are infrequent (typically one at a time, power-user scenario).
+
+This is the agreed model for MVP. If heavy multi-editor-window use emerges
+post-MVP, revisit a shared-worker or postMessage bridge.
+
+### 6.3 Inter-window communication
+
+- Tauri `emitTo(label, event, payload)` targets a specific child window.
+- Tauri `emit(event, payload)` broadcasts to all windows.
+- Each window listens via `listen(event, cb)`.
+- The Rust backend is the authoritative state owner; windows query/mutate state
+  via `invoke` commands rather than peer-to-peer window messaging.
+- The parent's status bar reflects the focused child window's context (e.g.,
+  active passage name, cursor position) via events emitted by the focused deck.
 
 ## 7. Server bug list
 
@@ -293,8 +329,111 @@ the Tauri spike — it's a server-side fix independent of the app shell.
 | Story Map v2 scope creep | High | Hard scope freeze after §4 features. Anything else → `ROADMAP.md`. |
 | Tweego coupling blocks in-house compiler | Medium | Phase 7 introduces `Compiler` trait; tweego becomes one implementation. Phase 10 is a swap, not a 900-line rewrite. |
 | `.vscode/knot.json` → `.knot/config.json` migration breaks existing projects | Low | Auto-migrate on first open; write `.vscode/knot.json.bak` backup. 3 code sites to update (`lifecycle.rs:73`, `sync.rs:1265`, plus the new Tauri-side config loader). |
+| Monaco + Vite production build breaks (works in dev, fails in `tauri build`) | High | Phase 0 spike validates a minimal `tauri build` with bare Monaco before building features. Use manual `?worker` imports + `MonacoEnvironment.getWorker`; do NOT use `vite-plugin-monaco-editor` (conflicts with `monaco-vscode-api`). |
+| `tauri-plugin-shell` breaks LSP framing (splits stdout on newlines) | High | Do NOT route LSP stdout through the shell plugin. Use `tokio::process::Command` directly in the Rust backend with manual `Content-Length` frame parsing. Documented bug: plugins-workspace#1632. |
+| Detached editor window `initialize()` cost on multi-monitor use | Low | Acceptable per §6.2. Monitor memory usage if users spawn many editor windows; revisit shared-worker bridge if it becomes a problem. |
+| WebKitGTK (Linux) Monaco perf on very large files | Medium | WebKitGTK 2.52+ is substantially improved. Test on Ubuntu 22.04 in Phase 0. Disable minimap + bracket-pair colorization for files >5MB. |
+| Auto-updater signing key loss | High | Generate keys once, store private key in a secret manager (not in the repo). Lose the key = can never update existing installs. |
 
-## 10. Open items
+## 11. Integration research findings (Phase 0 basis)
+
+Researched August 2026. Full findings in the task worklog.
+
+### 11.1 Frontend stack (locked)
+
+| Concern | Package | Version |
+|---|---|---|
+| Editor | `monaco-editor` | ~0.56 |
+| VS Code services in Monaco | `@codingame/monaco-vscode-api` | matching |
+| LSP client | `monaco-languageclient` | ^10.7 |
+| Graph renderer | `@xyflow/svelte` | ^1.x |
+| Framework | Svelte 5 + Vite 5/6 | latest |
+| Tauri APIs | `@tauri-apps/api`, `@tauri-apps/cli` | ^2 |
+| Tauri plugins | dialog, fs, updater, window-state, store, global-shortcut | v2 |
+
+### 11.2 CSP (in `tauri.conf.json`)
+
+```
+default-src 'self';
+script-src 'self' 'wasm-unsafe-eval';
+worker-src 'self' blob:;
+connect-src ipc: http://ipc.localhost
+```
+
+`'wasm-unsafe-eval'` is required for oniguruma WASM (TextMate tokenization).
+Monaco itself needs neither `eval` nor inline scripts.
+
+### 11.3 Monaco worker setup
+
+Manual `?worker` imports + `MonacoEnvironment.getWorker` map. Do NOT use
+`vite-plugin-monaco-editor` — it conflicts with `monaco-vscode-api` and causes
+"Could not resolve editor.worker" build failures.
+
+### 11.4 TextMate grammars
+
+`@codingame/monaco-vscode-api` runs existing `.tmLanguage.json` files unmodified
+via `vscode-textmate` + oniguruma WASM. Register the 5 grammars (Twee, SugarCube,
+Harlowe, Chapbook, Snowman) as VS Code extension contributions via the extensions
+service override. The grammars need to be recreated (they were in the purged
+VS Code extension) — the SugarCube parser's tokenizer rules in
+`crates/formats/src/sugarcube/lsp/token_builder.rs` are the source of truth.
+
+### 11.5 LSP transport (custom, ~150 LOC frontend)
+
+`monaco-languageclient` v10 supports custom `MessageTransports`.
+
+- **Writer** (`TauriIpcWriter`): serializes JSON-RPC, calls
+  `invoke('lsp_send', { payload })` → Rust writes to `knot-server` stdin with
+  `Content-Length` framing.
+- **Reader** (`TauriIpcReader`): listens to `lsp-message` Tauri events emitted
+  by the Rust backend (which frames `knot-server` stdout), dispatches to
+  `vscode-jsonrpc` reader.
+
+Maintainer-confirmed (TypeFox discussion #583). No off-the-shelf Tauri+LSP
+template exists; the transport shim is greenfield.
+
+### 11.6 Subprocess supervisor (Rust backend, ~400 LOC)
+
+- Spawn `knot-server` with `tokio::process::Command` (NOT `tauri-plugin-shell` —
+  it breaks LSP framing by splitting stdout on newlines).
+- Async task reads stdout, parses `Content-Length` frames,
+  `app.emit("lsp-message", body)`.
+- `#[tauri::command] fn lsp_send(payload: String)` writes framed messages to stdin.
+- **Watchdog:** LSP `$/ping` every 10s; timeout → kill + restart.
+- **Crash capture:** on child exit, capture last N stdout lines + exit code →
+  anonymized report to `<appData>/crash-reports/<timestamp>.json`.
+- **Auto-restart:** exponential backoff (2s → 4s → 8s → 16s cap), max 5 retries.
+- **State restore:** track open documents + cursor positions + in-flight edits in
+  `tauri::State`; on restart, re-`initialize` → re-`didOpen` all docs → replay
+  pending edits.
+
+### 11.7 Sidecar bundling
+
+`knot-server` and Tweego binaries bundled via Tauri's `bundle.externalBin` with
+`target-triple` suffixes (e.g., `knot-server-x86_64-unknown-linux-gnu`,
+`knot-server-aarch64-apple-darwin`). At runtime, resolve via
+`app.path().resolve("knot-server", BaseDirectory::Executable)`. Build pipeline
+produces per-target binaries; the Tauri bundler picks the right one per platform.
+
+### 11.8 Native menu bar
+
+Tauri 2 `Menu` / `Submenu` API. macOS: screen-top, items must be grouped under
+submenus. Windows/Linux: in-window. Structure:
+
+- **App** (macOS) / **File** (Win/Linux): New Project, Open…, Recent, Quit
+- **Edit**: Undo, Redo, Cut, Copy, Paste, Find…
+- **View**: Toggle Story Map, Toggle Asset Manager, Theme, Zoom…
+- **Build**: Build, Play, Watch toggle
+- **Help**: About, **Check for Updates…**, Documentation
+
+### 11.9 Auto-updater
+
+`tauri-plugin-updater` + `tauri signer` CLI. `tauri-action` GitHub Action
+builds Win/Mac/Linux matrix, uploads to GitHub Release, auto-generates
+`latest.json`. "Check for Updates…" menu item calls `check()` →
+`downloadAndInstall()` → `relaunch()`.
+
+## 12. Open items
 
 | Item | Default proposal | Status |
 |---|---|---|
@@ -308,4 +447,6 @@ the Tauri spike — it's a server-side fix independent of the app shell.
 ---
 
 **Next action:** Fix Bug #7 on `main` (reparse decision in `sync.rs`), then
-scaffold the Tauri app shell in a new `app/` directory at the repo root.
+scaffold the Tauri app shell in a new `app/` directory and run the Phase 0 spike
+(validate Monaco+Vite+Tauri production build, LSP round-trip over Tauri IPC,
+crash-during-edit sequence diagram).

@@ -1,0 +1,48 @@
+[package]
+name = "knot-app"
+version = "0.1.0"
+description = "Knot — Twine IDE"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "knot_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-store = "2"
+tauri-plugin-clipboard-manager = "2"
+
+# Async runtime + subprocess for LSP supervisor
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Binary path resolution (PATH lookup for sidecar fallback)
+which = "7"
+
+# Trash (cross-platform move-to-trash instead of permanent delete)
+trash = "5"
+
+[features]
+# Custom protocol (tauri dev uses vite dev server; tauri build uses embedded assets)
+custom-protocol = ["tauri/custom-protocol"]
+
+# Keep this package out of the root workspace (crates/). The Tauri app has
+# different deps and build requirements than the LSP server crates.
+[workspace]

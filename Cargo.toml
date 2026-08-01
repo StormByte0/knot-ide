@@ -10,7 +10,7 @@ members = [
 version = "2.0.1-preview"
 edition = "2024"
 license = "LicenseRef-Knot-Source-Available"
-repository = "https://github.com/StormByte0/Knot"
+repository = "https://github.com/StormByte0/knot-ide"
 
 [workspace.dependencies]
 # LSP
