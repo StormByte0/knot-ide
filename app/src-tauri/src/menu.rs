@@ -4,8 +4,8 @@
 //! dispatches. Only File menu items are wired for the spike; Edit/View/Build/Help
 //! are stubs for later phases.
 
-use tauri::{AppHandle, Emitter, Manager};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu, IsMenuItem};
+use tauri::{AppHandle, Emitter};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 /// Build and set the application menu. Called once during app setup.
 pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
