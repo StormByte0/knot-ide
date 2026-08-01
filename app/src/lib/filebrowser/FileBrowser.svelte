@@ -34,6 +34,19 @@
     }
   }
 
+  /** Svelte action: focus the input and select the filename (not extension). */
+  function focusAndSelect(node: HTMLInputElement) {
+    node.focus();
+    // Select filename only (not extension) for rename; full text for new file.
+    const value = node.value;
+    const lastDot = value.lastIndexOf('.');
+    if (lastDot > 0 && editState?.type === 'rename') {
+      node.setSelectionRange(0, lastDot);
+    } else {
+      node.select();
+    }
+  }
+
   interface Props {
     folder: string;
     currentFile: string | null;
@@ -183,7 +196,7 @@
     const nodes = flatten(rootChildren);
     // Insert temporary edit nodes for new-file/new-folder.
     if (editState && (editState.type === 'new-file' || editState.type === 'new-folder')) {
-      const parent = editState.type === 'rename' ? null : findNode(rootChildren, editState.parentId);
+      const parent = findNode(rootChildren, editState.parentId);
       if (parent && parent.expanded) {
         // Insert temp node at the right depth.
         const tempNode: TreeNode = {
@@ -734,35 +747,40 @@
           class:cut={clipboard?.operation === 'cut' && clipboard.paths.includes(node.path)}
           data-id={node.path}
           style="padding-left: {8 + node.depth * 14}px"
-          onclick={() => (node.isDirectory ? toggleDir(node) : handleSelectFile(node))}
-          oncontextmenu={(e) => { e.preventDefault(); showContextMenu(node, e.clientX, e.clientY); }}
-          draggable={node.path !== ''}
-          ondragstart={(e) => handleDragStart(e, node)}
-          ondragover={(e) => handleDragOver(e, node)}
-          ondragleave={(e) => handleDragLeave(e, node)}
-          ondrop={(e) => handleDrop(e, node)}
-          ondragend={handleDragEnd}
           role="treeitem"
+          tabindex="-1"
           aria-selected={selectedNode?.path === node.path}
         >
-          <span class="chevron">
-            {#if node.isDirectory}
-              {#if node.loading}⋯{:else if node.expanded}▾{:else}▸{/if}
+          <button
+            class="tree-row-inner"
+            onclick={() => (node.isDirectory ? toggleDir(node) : handleSelectFile(node))}
+            oncontextmenu={(e) => { e.preventDefault(); showContextMenu(node, e.clientX, e.clientY); }}
+            draggable={node.path !== ''}
+            ondragstart={(e) => handleDragStart(e, node)}
+            ondragover={(e) => handleDragOver(e, node)}
+            ondragleave={(e) => handleDragLeave(e, node)}
+            ondrop={(e) => handleDrop(e, node)}
+            ondragend={handleDragEnd}
+          >
+            <span class="chevron">
+              {#if node.isDirectory}
+                {#if node.loading}⋯{:else if node.expanded}▾{:else}▸{/if}
+              {/if}
+            </span>
+            <span class="icon">{getFileIcon(node.name, node.isDirectory)}</span>
+            {#if isEditing(node)}
+              <input
+                class="inline-edit"
+                bind:value={editValue}
+                onkeydown={handleEditKeydown}
+                onblur={confirmEdit}
+                use:focusAndSelect
+              />
+              {#if editError}<span class="edit-error">{editError}</span>{/if}
+            {:else}
+              <span class="name">{node.name}</span>
             {/if}
-          </span>
-          <span class="icon">{getFileIcon(node.name, node.isDirectory)}</span>
-          {#if isEditing(node)}
-            <input
-              class="inline-edit"
-              bind:value={editValue}
-              onkeydown={handleEditKeydown}
-              onblur={confirmEdit}
-              {autofocus}
-            />
-            {#if editError}<span class="edit-error">{editError}</span>{/if}
-          {:else}
-            <span class="name">{node.name}</span>
-          {/if}
+          </button>
         </div>
       {/each}
     {:else}
@@ -839,9 +857,22 @@
   .tree-row {
     display: flex;
     align-items: center;
-    gap: 4px;
     width: 100%;
     color: #cccccc;
+    line-height: 1.4;
+    user-select: none;
+  }
+
+  .tree-row-inner {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: inherit;
     padding: 3px 8px;
     cursor: pointer;
     font-size: 13px;
@@ -849,8 +880,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    line-height: 1.4;
-    user-select: none;
   }
 
   .tree-row:hover {

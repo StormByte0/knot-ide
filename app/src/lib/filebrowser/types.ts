@@ -12,6 +12,8 @@ export interface FileEntry {
 }
 
 export interface TreeNode extends FileEntry {
+  /** Stable identity (=== path) used to preserve expansion/selection across refreshes. */
+  id: string;
   /** Child nodes. Empty for files, or for directories that haven't been loaded yet. */
   children: TreeNode[];
   /** Whether this directory is expanded in the UI. */
