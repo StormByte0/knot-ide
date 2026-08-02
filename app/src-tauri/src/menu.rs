@@ -3,11 +3,20 @@
 //! Menu items emit `menu-action` events to the frontend, which listens and
 //! dispatches. Only File menu items are wired for the spike; Edit/View/Build/Help
 //! are stubs for later phases.
+//!
+//! ## Per-window menu (Task 5)
+//!
+//! The menu is set ONLY on the main window, not globally. Child windows
+//! (detached tabs created via `WebviewWindow` from the frontend) have no
+//! menu bar — they're thin view windows, not full app shells. This avoids
+//! `app.set_menu()` which sets a global default inherited by ALL windows on
+//! Windows/Linux.
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-/// Build and set the application menu. Called once during app setup.
+/// Build and set the application menu on the main window only. Called once
+/// during app setup.
 pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let menu = Menu::with_items(app, &[
         // ── File ──
@@ -18,6 +27,8 @@ pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             &MenuItem::with_id(app, "open-folder", "Open Folder…", true, Some("Ctrl+O"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "save", "Save", true, Some("Ctrl+S"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, Some("Ctrl+,"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, Some("Ctrl+Q"))?,
         ])?,
@@ -57,7 +68,17 @@ pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         ])?,
     ])?;
 
-    app.set_menu(menu)?;
+    // Set the menu ONLY on the main window, not globally. `app.set_menu()`
+    // would set a global default inherited by all child windows on
+    // Windows/Linux — child windows (detached tabs) should have no menu bar.
+    match app.get_webview_window("main") {
+        Some(main_window) => {
+            main_window.set_menu(menu)?;
+        }
+        None => {
+            tracing::warn!("main window not found during menu setup — menu not set");
+        }
+    }
     Ok(())
 }
 

@@ -5,15 +5,25 @@
    * Creates a Monaco editor instance bound to a file URI + content. The editor
    * syncs changes to the LSP server via `didOpen` / `didChange` (handled
    * automatically by `monaco-languageclient` once the client is started).
+   *
+   * ## Task 3 integration
+   *
+   * The Editor is now rendered by {@link DockPanel.svelte} when the active tab
+   * is `kind: 'editor'`. Props come from the tab's payload. Content changes
+   * are pushed to {@link layoutStore.markTabContentChanged} so the tab's
+   * dirty flag + cached content stay in sync.
    */
 
   import { onMount, onDestroy } from 'svelte';
   import * as monaco from 'monaco-editor';
   import { initializeMonaco, TWEE_LANGUAGE_ID } from '$lib/editor/monaco-init';
   import { statusStore } from '$lib/statusbar/statusStore.svelte';
-  import { editorStore } from '$lib/editor/editorStore.svelte';
+  import { layoutStore } from '$lib/layout/layoutStore.svelte';
+  import { editorSettingsStore } from '$lib/settings/editorSettings.svelte';
 
   interface Props {
+    /** Tab id (=== file path). Used for layout-store content tracking. */
+    tabId: string;
     /** File URI in `file://` scheme. Required for LSP `didOpen`. */
     uri: string;
     /** Initial file content. */
@@ -22,7 +32,7 @@
     language?: string;
   }
 
-  let { uri, content, language = TWEE_LANGUAGE_ID }: Props = $props();
+  let { tabId, uri, content, language = TWEE_LANGUAGE_ID }: Props = $props();
 
   let container: HTMLDivElement;
   let editor: monaco.editor.IStandaloneCodeEditor | null = null;
@@ -41,36 +51,33 @@
     editor = monaco.editor.create(container, {
       model,
       automaticLayout: true,
-      theme: 'vs-dark',
-      fontSize: 14,
-      minimap: { enabled: true },
+      theme: editorSettingsStore.settings.theme,
+      fontFamily: editorSettingsStore.settings.fontFamily,
+      fontSize: editorSettingsStore.settings.fontSize,
+      minimap: { enabled: editorSettingsStore.settings.minimap },
       scrollBeyondLastLine: false,
-      tabSize: 2,
-      wordWrap: 'on',
+      tabSize: editorSettingsStore.settings.tabSize,
+      wordWrap: editorSettingsStore.settings.wordWrap,
       lineNumbers: 'on',
       renderWhitespace: 'selection',
-      bracketPairColorization: { enabled: true },
+      bracketPairColorization: { enabled: editorSettingsStore.settings.bracketPairColorization },
     });
 
     console.log('[knot] Monaco editor created for', uri, 'content length:', content.length);
 
-    // Notify the editor store of content changes (for dirty-state tracking).
-    // The store updates the tab's `isDirty` flag + cached content; the
-    // tab strip re-renders to show the dirty dot.
+    // Notify the layout store of content changes (for dirty-state tracking).
+    // The store updates the tab's `isDirty` flag + cached content; the tab
+    // strip re-renders to show the dirty dot.
     editor.onDidChangeModelContent(() => {
       const value = editor!.getValue();
-      // Update the local `content` prop so the parent's $derived stays in
-      // sync (used for model-swap comparisons on tab switch).
       content = value;
-      if (currentUri) {
-        editorStore.markContentChanged(currentUri, value);
-      }
+      layoutStore.markTabContentChanged(tabId, value);
     });
 
-    // Push the active file + language to the status store. The URI is the
-    // source of truth for "what's being edited"; the language prop tells
-    // the status bar which language label to show.
-    statusStore.setActiveFile(uri, language);
+    // Push the active file path + language to the status store. The path
+    // (tabId) is what the status bar and file browser use for display /
+    // highlighting.
+    statusStore.setActiveFile(tabId, language);
 
     // Push the initial cursor position (1:1 on a fresh model) and subscribe
     // to future moves so the status bar tracks line:col live.
@@ -85,6 +92,23 @@
     currentUri = uri;
   });
 
+  // Reactively apply editor settings when they change (e.g. user changed
+  // font size in the Settings dialog). $effect re-runs whenever any
+  // settingsStore.settings field read inside it changes.
+  $effect(() => {
+    if (!editor) return;
+    const s = editorSettingsStore.settings;
+    editor.updateOptions({
+      theme: s.theme,
+      fontFamily: s.fontFamily,
+      fontSize: s.fontSize,
+      minimap: { enabled: s.minimap },
+      tabSize: s.tabSize,
+      wordWrap: s.wordWrap,
+      bracketPairColorization: { enabled: s.bracketPairColorization },
+    });
+  });
+
   onDestroy(() => {
     editor?.dispose();
     model?.dispose();
@@ -92,14 +116,16 @@
     model = null;
     // Clear active-file state so the status bar doesn't show a stale file
     // after the editor is destroyed (e.g. user closed the last tab).
+    // TODO: when multiple editor panels exist (Task 5), only clear if this
+    // was the active editor. For now there's at most one editor panel.
     statusStore.clearActiveFile();
   });
 
   // When the URI changes (different tab activated), swap the Monaco model.
-  // The tab's content is read from the editor store so a previously-typed
-  // (unsaved) edit is preserved across tab switches.
+  // The `content` prop is passed by DockPanel from the tab's payload, so
+  // unsaved edits (tracked in the layout store) are preserved across tab
+  // switches.
   $effect(() => {
-    // Track uri so the effect re-runs when it changes.
     const targetUri = uri;
     if (!editor || targetUri === currentUri) return;
     currentUri = targetUri;
@@ -108,24 +134,19 @@
 
     const monacoUri = monaco.Uri.parse(targetUri);
     let existing = monaco.editor.getModel(monacoUri);
-    // The store holds the latest known content (including unsaved edits).
-    const storeTab = editorStore.tabs.find((t) => t.uri === targetUri);
-    const expectedContent = storeTab?.content ?? content;
     if (!existing) {
-      // Create a new model with the current content.
-      existing = monaco.editor.createModel(expectedContent, language, monacoUri);
-      console.log('[knot:editor] created new model, content length:', expectedContent.length);
+      existing = monaco.editor.createModel(content, language, monacoUri);
+      console.log('[knot:editor] created new model, content length:', content.length);
     } else {
-      // Update existing model's content if it differs (e.g. file reload).
-      if (existing.getValue() !== expectedContent) {
-        existing.setValue(expectedContent);
+      if (existing.getValue() !== content) {
+        existing.setValue(content);
       }
     }
     model = existing;
     editor.setModel(model);
 
     // Sync the status store with the newly-active file + language.
-    statusStore.setActiveFile(targetUri, language);
+    statusStore.setActiveFile(tabId, language);
     const pos = editor.getPosition();
     if (pos) {
       statusStore.setCursorPosition(pos.lineNumber, pos.column);

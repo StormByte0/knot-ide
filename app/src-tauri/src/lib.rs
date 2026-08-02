@@ -1,8 +1,10 @@
 //! Knot app — Tauri 2 backend.
 
+mod config;
 mod fs_ops;
 mod lsp;
 mod menu;
+mod settings;
 mod watcher;
 
 use fs_ops::WorkspaceRoot;
@@ -66,6 +68,12 @@ pub fn run() {
             fs_ops::set_workspace_root,
             watcher::watch_workspace,
             watcher::stop_watching,
+            config::load_project_settings,
+            config::save_project_settings,
+            config::migrate_vscode_config,
+            settings::load_editor_settings,
+            settings::save_editor_settings,
+            settings::detect_tweego,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

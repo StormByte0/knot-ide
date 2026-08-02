@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "main-capability",
-  "description": "Capabilities for the main window in the Phase 0 spike",
-  "windows": ["main"],
+  "description": "Capabilities for all windows (parent + detached children) in Phase 1",
+  "windows": ["*"],
   "permissions": [
     "core:default",
     "core:event:default",
@@ -14,6 +14,7 @@
     "core:window:allow-create",
     "core:window:allow-close",
     "core:window:allow-set-title",
+    "core:window:allow-set-focus",
     "core:webview:default",
     "core:webview:allow-create-webview-window",
     "core:path:default",
