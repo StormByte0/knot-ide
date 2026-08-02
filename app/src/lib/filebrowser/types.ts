@@ -25,3 +25,30 @@ export interface TreeNode extends FileEntry {
   /** Depth in the tree (0 = workspace root's children). */
   depth: number;
 }
+
+/**
+ * Inline editing state — drives the `<input>` rendered in place of a row's name.
+ *
+ * Discriminated union so the renderer can branch on `editState.type` without
+ * narrowing on optional fields. No closures stored — only plain data.
+ */
+export type EditState =
+  | { type: 'new-file'; parentPath: string; parentId: string; tempId: string }
+  | { type: 'new-folder'; parentPath: string; parentId: string; tempId: string }
+  | { type: 'rename'; node: TreeNode };
+
+/** Clipboard state for cut/copy/paste. `null` = clipboard empty. */
+export type Clipboard = { operation: 'copy' | 'cut'; paths: string[] } | null;
+
+/**
+ * Payload emitted by the backend via the `fs-changed` Tauri event.
+ * Produced by `watcher.rs` — see that file for the `EventKind` → `kind` mapping.
+ */
+export interface FsChangedEvent {
+  /** `"create"` | `"remove"` | `"rename"` | `"modify"` */
+  kind: string;
+  /** Full path of the changed file/dir. For `"rename"`, this is the NEW path. */
+  path: string;
+  /** For `"rename"` only: the previous path that was renamed away. */
+  oldPath?: string;
+}

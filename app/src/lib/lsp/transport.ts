@@ -31,8 +31,11 @@ import {
 /** Tauri event name carrying an LSP message body (JSON-RPC string). */
 const LSP_MESSAGE_EVENT = 'lsp-message';
 
-/** Tauri event name signaling the server process exited. */
+/** Tauri event name signaling the server process exited (will auto-restart). */
 const LSP_EXITED_EVENT = 'lsp-exited';
+
+/** Tauri event name signaling the supervisor gave up (max crashes reached). */
+const LSP_FAILED_EVENT = 'lsp-failed';
 
 /**
  * `MessageReader` backed by Tauri events.
@@ -70,8 +73,13 @@ export class TauriIpcReader extends AbstractMessageReader {
         this.fireError(err instanceof Error ? err : new Error(String(err)));
       });
 
-    // Also listen for server-exit to fire the close handler.
-    listen<number>(LSP_EXITED_EVENT, () => {
+    // On `lsp-exited`: do NOT fire close — the supervisor will auto-restart.
+    // The LanguageClient stays alive across the restart; messages sent during
+    // the downtime are silently dropped by the backend (state is still tracked).
+    // On `lsp-failed`: the supervisor gave up (max crashes reached) — fire
+    // close so the LanguageClient transitions to "stopped".
+    listen<string>(LSP_FAILED_EVENT, () => {
+      console.warn('[knot:lsp] supervisor gave up — firing close');
       this.fireClose();
     })
       .then((unlisten) => {

@@ -2,6 +2,13 @@
   /**
    * File browser — VS Code-style file explorer.
    *
+   * Orchestrates: tree state, lazy loading, inline editing, clipboard,
+   * drag-and-drop, keyboard navigation, auto-reveal, and FS-watcher refresh.
+   *
+   * Row rendering is delegated to `TreeRow.svelte` (CONVENTIONS §2.3 — single
+   * responsibility). This component owns state and dispatches; the row is pure
+   * presentation + event forwarding.
+   *
    * Features:
    * - Lazy-loading tree (flat-list rendering, stable node IDs)
    * - Inline New File / New Folder / Rename (no modal — input box in the row)
@@ -12,7 +19,6 @@
    * - Keyboard navigation (arrows, Enter, F2, Delete, Ctrl+X/C/V, Escape)
    * - Drag and drop (move + Ctrl-copy, reject self/cycle, auto-expand on hover)
    * - Auto-reveal (when currentFile changes, expand ancestors + scroll to node)
-   * - Indent guides
    * - Auto-refresh via FS watcher (backend emits `fs-changed` events)
    */
 
@@ -21,8 +27,8 @@
   import { join } from '@tauri-apps/api/path';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import ContextMenu, { type MenuEntry } from './ContextMenu.svelte';
-  import { getFileIcon } from './icons';
-  import type { FileEntry, TreeNode } from './types';
+  import TreeRow from './TreeRow.svelte';
+  import type { Clipboard, EditState, FileEntry, FsChangedEvent, TreeNode } from './types';
 
   /** Copy text to clipboard. */
   async function copyToClipboard(text: string): Promise<void> {
@@ -31,19 +37,6 @@
       await writeText(text);
     } catch {
       await navigator.clipboard.writeText(text);
-    }
-  }
-
-  /** Svelte action: focus the input and select the filename (not extension). */
-  function focusAndSelect(node: HTMLInputElement) {
-    node.focus();
-    // Select filename only (not extension) for rename; full text for new file.
-    const value = node.value;
-    const lastDot = value.lastIndexOf('.');
-    if (lastDot > 0 && editState?.type === 'rename') {
-      node.setSelectionRange(0, lastDot);
-    } else {
-      node.select();
     }
   }
 
@@ -72,21 +65,28 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
 
   // --- Editing state (inline input) ---
-  type EditState =
-    | { type: 'new-file'; parentPath: string; parentId: string; tempId: string }
-    | { type: 'new-folder'; parentPath: string; parentId: string; tempId: string }
-    | { type: 'rename'; node: TreeNode };
   let editState = $state<EditState | null>(null);
   let editValue = $state('');
   let editError = $state<string | null>(null);
 
   // --- Clipboard ---
-  type Clipboard = { operation: 'copy' | 'cut'; paths: string[] } | null;
   let clipboard = $state<Clipboard>(null);
 
   // --- FS watcher ---
   let fsUnlisten: UnlistenFn | null = null;
   let treeContainer: HTMLDivElement;
+
+  // --- Path helpers ---
+
+  /** Extract the parent directory of a path. Falls back to workspace root.
+   *  Does NOT normalize separators — the result must match OS-native paths
+   *  returned by the backend (`list_dir`, watcher events) for comparisons
+   *  like `dirPath === folder` and `findNode(...)` to work on Windows. */
+  function parentDir(path: string): string {
+    const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    if (lastSep < 0) return folder;
+    return path.substring(0, lastSep) || folder;
+  }
 
   // --- Tree building ---
 
@@ -96,6 +96,7 @@
       path: entry.path,
       name: entry.name,
       isDirectory: entry.isDirectory,
+      isFile: entry.isFile,
       children: [],
       expanded: false,
       loaded: false,
@@ -123,15 +124,40 @@
 
   async function refreshDir(dirPath: string) {
     if (dirPath === folder) {
-      rootChildren = await fetchChildren(folder, 0);
-      rootChildren = [...rootChildren];
+      const newChildren = await fetchChildren(folder, 0);
+      rootChildren = mergeChildren(rootChildren, newChildren);
       return;
     }
     const node = findNode(rootChildren, dirPath);
     if (node && node.isDirectory && node.loaded) {
-      node.children = await fetchChildren(node.path, node.depth + 1);
+      const newChildren = await fetchChildren(node.path, node.depth + 1);
+      node.children = mergeChildren(node.children, newChildren);
       rootChildren = [...rootChildren];
     }
+  }
+
+  /**
+   * Merge fresh children with existing ones, preserving expand state.
+   *
+   * When the tree refreshes (after create/delete/rename/watcher event), we
+   * fetch a new set of child nodes from the backend. Naively replacing the
+   * array would collapse every expanded directory. Instead, for each new
+   * child that matches an existing child by path, we copy over `expanded`,
+   * `loaded`, `loading`, and `children` — so the subtree stays intact.
+   * New nodes (no match) start collapsed; deleted nodes (no new entry)
+   * simply don't appear in the result.
+   */
+  function mergeChildren(oldChildren: TreeNode[], newChildren: TreeNode[]): TreeNode[] {
+    return newChildren.map((newChild) => {
+      const oldChild = oldChildren.find((c) => c.path === newChild.path);
+      if (oldChild && oldChild.isDirectory) {
+        newChild.expanded = oldChild.expanded;
+        newChild.loaded = oldChild.loaded;
+        newChild.loading = oldChild.loading;
+        newChild.children = oldChild.children;
+      }
+      return newChild;
+    });
   }
 
   function findNode(nodes: TreeNode[], path: string): TreeNode | null {
@@ -167,13 +193,25 @@
   async function startWatcher() {
     try {
       await invoke('watch_workspace', { rootPath: folder });
-      fsUnlisten = await listen<{ kind: string; path: string }>('fs-changed', (event) => {
-        const changedPath = event.payload.path;
-        // Refresh the parent of the changed path.
-        const parent = changedPath.substring(0, changedPath.lastIndexOf('/') + 1) ||
-                       changedPath.substring(0, changedPath.lastIndexOf('\\') + 1);
-        const parentDir = parent.replace(/[/\\]+$/, '') || folder;
-        refreshDir(parentDir);
+      fsUnlisten = await listen<FsChangedEvent>('fs-changed', (event) => {
+        const { kind, path, oldPath } = event.payload;
+        switch (kind) {
+          case 'create':
+          case 'remove':
+            // A node appeared/disappeared — refresh the parent to update the tree.
+            refreshDir(parentDir(path));
+            break;
+          case 'rename':
+            // Refresh both the old parent (node disappeared) and new parent (node appeared).
+            refreshDir(parentDir(path));
+            if (oldPath && parentDir(oldPath) !== parentDir(path)) {
+              refreshDir(parentDir(oldPath));
+            }
+            break;
+          case 'modify':
+            // File content/metadata change — doesn't affect tree structure. Skip.
+            break;
+        }
       });
     } catch (err) {
       console.error('[knot:filebrowser] watcher failed:', err);
@@ -196,24 +234,32 @@
     const nodes = flatten(rootChildren);
     // Insert temporary edit nodes for new-file/new-folder.
     if (editState && (editState.type === 'new-file' || editState.type === 'new-folder')) {
-      const parent = findNode(rootChildren, editState.parentId);
-      if (parent && parent.expanded) {
-        // Insert temp node at the right depth.
-        const tempNode: TreeNode = {
-          id: editState.tempId,
-          path: '',
-          name: editValue || '',
-          isDirectory: editState.type === 'new-folder',
-          children: [],
-          expanded: false,
-          loaded: false,
-          loading: false,
-          depth: parent.depth + 1,
-        };
-        // Insert right after parent's last child (or after parent if no children).
-        const parentIdx = nodes.indexOf(parent);
-        if (parentIdx >= 0) {
-          nodes.splice(parentIdx + 1, 0, tempNode);
+      const tempNode: TreeNode = {
+        id: editState.tempId,
+        path: '',
+        name: editValue || '',
+        isDirectory: editState.type === 'new-folder',
+        isFile: editState.type === 'new-file',
+        children: [],
+        expanded: false,
+        loaded: false,
+        loading: false,
+        depth: 0,
+      };
+
+      if (editState.parentId === folder) {
+        // Root-level: the workspace root isn't a node in rootChildren, so
+        // we can't findNode it. Insert the temp node at the end of the
+        // root-level flat list.
+        nodes.push(tempNode);
+      } else {
+        const parent = findNode(rootChildren, editState.parentId);
+        if (parent && parent.expanded) {
+          tempNode.depth = parent.depth + 1;
+          const parentIdx = nodes.indexOf(parent);
+          if (parentIdx >= 0) {
+            nodes.splice(parentIdx + 1, 0, tempNode);
+          }
         }
       }
     }
@@ -289,13 +335,15 @@
   function startNewFile(node: TreeNode | null) {
     const targetDir = getTargetDir(node);
     const target = node ?? selectedNode;
-    const parentId = target ? (target.isDirectory ? target.id : folder) : folder;
-    // Ensure parent is expanded.
-    const parent = target ? (target.isDirectory ? target : findNode(rootChildren, getTargetDir(target))) : null;
+    // parentId is always the target directory's path — for directories it's
+    // the dir itself, for files it's the file's parent, for nothing it's root.
+    const parent = target?.isDirectory
+      ? target
+      : findNode(rootChildren, targetDir);
     if (parent && !parent.expanded) {
       parent.expanded = true;
     }
-    editState = { type: 'new-file', parentPath: targetDir, parentId, tempId: `__temp_${Date.now()}` };
+    editState = { type: 'new-file', parentPath: targetDir, parentId: targetDir, tempId: `__temp_${Date.now()}` };
     editValue = 'untitled.twee';
     editError = null;
     rootChildren = [...rootChildren];
@@ -304,12 +352,13 @@
   function startNewFolder(node: TreeNode | null) {
     const targetDir = getTargetDir(node);
     const target = node ?? selectedNode;
-    const parentId = target ? (target.isDirectory ? target.id : folder) : folder;
-    const parent = target ? (target.isDirectory ? target : findNode(rootChildren, getTargetDir(target))) : null;
+    const parent = target?.isDirectory
+      ? target
+      : findNode(rootChildren, targetDir);
     if (parent && !parent.expanded) {
       parent.expanded = true;
     }
-    editState = { type: 'new-folder', parentPath: targetDir, parentId, tempId: `__temp_${Date.now()}` };
+    editState = { type: 'new-folder', parentPath: targetDir, parentId: targetDir, tempId: `__temp_${Date.now()}` };
     editValue = 'new-folder';
     editError = null;
     rootChildren = [...rootChildren];
@@ -329,11 +378,41 @@
     rootChildren = [...rootChildren];
   }
 
+  /**
+   * Validate a name typed in the inline edit input.
+   *
+   * Accepts paths with slashes (e.g. `subfolder/deep/file.twee`) for the
+   * new-file and new-folder cases — intermediate directories are created
+   * automatically. Rejects:
+   * - empty names
+   * - absolute paths (leading `/` or `C:\`)
+   * - parent traversal (`..` segments)
+   * - backslashes in the path (typed `\` is normalized to `/` so the user
+   *   can type either separator on Windows)
+   *
+   * Returns the cleaned name, or throws with a user-facing error message.
+   */
+  function validateEditName(rawName: string): string {
+    const name = rawName.trim().replace(/\\/g, '/');
+    if (!name) throw new Error('Name cannot be empty');
+    if (name.startsWith('/')) throw new Error('Absolute paths are not allowed');
+    // Reject `C:\` style absolute paths (drive letter + colon).
+    if (/^[a-zA-Z]:/.test(name)) throw new Error('Absolute paths are not allowed');
+    const segments = name.split('/');
+    for (const seg of segments) {
+      if (seg === '..') throw new Error('Parent traversal (..) is not allowed');
+    }
+    return name;
+  }
+
   async function confirmEdit() {
     if (!editState) return;
-    const name = editValue.trim();
-    if (!name) {
-      editError = 'Name cannot be empty';
+
+    let name: string;
+    try {
+      name = validateEditName(editValue);
+    } catch (e) {
+      editError = e instanceof Error ? e.message : String(e);
       return;
     }
 
@@ -345,6 +424,12 @@
       switch (state.type) {
         case 'new-file': {
           const fullPath = await join(state.parentPath, name);
+          // If the name has slashes, intermediate dirs must be created first.
+          const lastSlash = name.lastIndexOf('/');
+          if (lastSlash > 0) {
+            const dirPart = await join(state.parentPath, name.substring(0, lastSlash));
+            await invoke<string>('create_dir_all', { path: dirPart });
+          }
           await invoke<string>('create_file', { path: fullPath });
           await refreshDir(state.parentPath);
           onSelect(fullPath);
@@ -352,7 +437,7 @@
         }
         case 'new-folder': {
           const fullPath = await join(state.parentPath, name);
-          await invoke<string>('create_dir', { path: fullPath });
+          await invoke<string>('create_dir_all', { path: fullPath });
           await refreshDir(state.parentPath);
           break;
         }
@@ -389,18 +474,6 @@
     if (!editState) return false;
     if (editState.type === 'rename') return editState.node.id === node.id;
     return editState.tempId === node.id;
-  }
-
-  /** Compute selection range for rename: filename without extension. */
-  function getEditSelection(node: TreeNode | null): { start: number; end: number } {
-    if (!node || node.isDirectory) {
-      return { start: 0, end: editValue.length };
-    }
-    const lastDot = node.name.lastIndexOf('.');
-    if (lastDot > 0) {
-      return { start: 0, end: lastDot };
-    }
-    return { start: 0, end: editValue.length };
   }
 
   // --- Context menu actions ---
@@ -482,7 +555,6 @@
         if (clipboard.operation === 'copy') {
           await invoke<string>('copy_file', { src: srcPath, dest });
         } else {
-          // cut = move
           await invoke<string>('rename_path', { oldPath: srcPath, newPath: dest });
         }
       } catch (err) {
@@ -557,7 +629,6 @@
           node.expanded = false;
           rootChildren = [...rootChildren];
         } else {
-          // Move to parent
           for (let i = idx - 1; i >= 0; i--) {
             if (nodes[i].isDirectory && nodes[i].depth < node.depth) {
               focusedId = nodes[i].id;
@@ -579,7 +650,7 @@
       }
       case 'F2': {
         e.preventDefault();
-        if (!node.isDirectory || true) startRename(node);
+        startRename(node);
         break;
       }
       case 'Delete': {
@@ -615,23 +686,24 @@
 
   function handleDragOver(e: DragEvent, node: TreeNode) {
     if (!draggedNode) return;
-    // Determine target: folder, or file's parent.
-    const target = node.isDirectory ? node : null;
-    if (!target) return;
-    if (target.path === draggedNode.path) return;
-    if (draggedNode.isDirectory && target.path.startsWith(draggedNode.path)) return;
+    // File→parent bubble: dropping on a file targets its parent directory
+    // (v2 spec). The target path is the dir we'd move/copy into.
+    const targetPath = node.isDirectory ? node.path : parentDir(node.path);
+    if (targetPath === draggedNode.path) return;
+    if (draggedNode.isDirectory && targetPath.startsWith(draggedNode.path)) return;
     e.preventDefault();
     if (e.dataTransfer) {
       dropEffect = (e.ctrlKey || e.metaKey) ? 'copy' : 'move';
       e.dataTransfer.dropEffect = dropEffect;
     }
-    dropTarget = target;
+    // Highlight the directory node (null if root — no root node exists).
+    dropTarget = node.isDirectory ? node : findNode(rootChildren, targetPath);
 
-    // Auto-expand on hover (after 500ms)
-    if (target.isDirectory && !target.expanded && !hoverTimer) {
+    // Auto-expand directory on hover.
+    if (node.isDirectory && !node.expanded && !hoverTimer) {
       hoverTimer = setTimeout(() => {
-        if (dropTarget === target) {
-          toggleDir(target);
+        if (dropTarget === node) {
+          toggleDir(node);
         }
         hoverTimer = null;
       }, 500);
@@ -653,21 +725,23 @@
     draggedNode = null;
     dropTarget = null;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
-    if (!source || !target.isDirectory) return;
-    if (source.path === target.path) return;
-    if (source.isDirectory && target.path.startsWith(source.path)) return;
+    if (!source) return;
+    // File→parent bubble: compute the actual target directory path.
+    const targetPath = target.isDirectory ? target.path : parentDir(target.path);
+    if (source.path === targetPath) return;
+    if (source.isDirectory && targetPath.startsWith(source.path)) return;
 
     const isCopy = (e.ctrlKey || e.metaKey);
     try {
-      const newPath = await join(target.path, source.name);
+      const newPath = await join(targetPath, source.name);
       if (isCopy) {
         await invoke<string>('copy_file', { src: source.path, dest: newPath });
       } else {
         await invoke<string>('rename_path', { oldPath: source.path, newPath });
       }
-      const sourceParent = source.path.substring(0, source.path.length - source.name.length).replace(/[/\\]+$/, '');
-      if (!isCopy) await refreshDir(sourceParent);
-      await refreshDir(target.path);
+      const sourceParent = parentDir(source.path);
+      if (!isCopy && sourceParent !== targetPath) await refreshDir(sourceParent);
+      await refreshDir(targetPath);
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -679,18 +753,25 @@
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
   }
 
+  // --- Row click/context dispatch (passed to TreeRow) ---
+
+  function handleRowClick(node: TreeNode) {
+    if (node.isDirectory) {
+      toggleDir(node);
+    } else {
+      handleSelectFile(node);
+    }
+  }
+
   // --- Auto-reveal ---
 
   $effect(() => {
-    // When currentFile changes, expand ancestors and scroll to the node.
     const file = currentFile;
     if (!file || loading) return;
-    // Use setTimeout to ensure the tree is rendered.
     setTimeout(() => revealFile(file), 50);
   });
 
   async function revealFile(filePath: string) {
-    // Walk up the path, expanding each ancestor.
     const parts = filePath.replace(/\\/g, '/').split('/').filter(Boolean);
     let current = folder.replace(/\\/g, '/').replace(/\/$/, '');
     for (let i = 0; i < parts.length - 1; i++) {
@@ -700,7 +781,6 @@
         await toggleDir(node);
       }
     }
-    // Scroll to the file node.
     const fileNode = findNode(rootChildren, filePath);
     if (fileNode && treeContainer) {
       const el = treeContainer.querySelector(`[data-id="${CSS.escape(filePath)}"]`);
@@ -740,48 +820,26 @@
       <div class="error">{error}</div>
     {:else if visibleNodes.length > 0}
       {#each visibleNodes as node (node.id)}
-        <div
-          class="tree-row"
-          class:selected={currentFile === node.path || selectedNode?.path === node.path}
-          class:drop-target={dropTarget === node}
-          class:cut={clipboard?.operation === 'cut' && clipboard.paths.includes(node.path)}
-          data-id={node.path}
-          style="padding-left: {8 + node.depth * 14}px"
-          role="treeitem"
-          tabindex="-1"
-          aria-selected={selectedNode?.path === node.path}
-        >
-          <button
-            class="tree-row-inner"
-            onclick={() => (node.isDirectory ? toggleDir(node) : handleSelectFile(node))}
-            oncontextmenu={(e) => { e.preventDefault(); showContextMenu(node, e.clientX, e.clientY); }}
-            draggable={node.path !== ''}
-            ondragstart={(e) => handleDragStart(e, node)}
-            ondragover={(e) => handleDragOver(e, node)}
-            ondragleave={(e) => handleDragLeave(e, node)}
-            ondrop={(e) => handleDrop(e, node)}
-            ondragend={handleDragEnd}
-          >
-            <span class="chevron">
-              {#if node.isDirectory}
-                {#if node.loading}⋯{:else if node.expanded}▾{:else}▸{/if}
-              {/if}
-            </span>
-            <span class="icon">{getFileIcon(node.name, node.isDirectory)}</span>
-            {#if isEditing(node)}
-              <input
-                class="inline-edit"
-                bind:value={editValue}
-                onkeydown={handleEditKeydown}
-                onblur={confirmEdit}
-                use:focusAndSelect
-              />
-              {#if editError}<span class="edit-error">{editError}</span>{/if}
-            {:else}
-              <span class="name">{node.name}</span>
-            {/if}
-          </button>
-        </div>
+        <TreeRow
+          {node}
+          isSelected={currentFile === node.path || selectedNode?.path === node.path}
+          isDropTarget={dropTarget === node}
+          isCut={clipboard?.operation === 'cut' && clipboard.paths.includes(node.path)}
+          isEditing={isEditing(node)}
+          {editValue}
+          {editError}
+          isRenaming={editState?.type === 'rename'}
+          onClick={handleRowClick}
+          onContextMenu={showContextMenu}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          onDragEnd={handleDragEnd}
+          onEditKeydown={handleEditKeydown}
+          onEditBlur={confirmEdit}
+          onEditInput={(v) => (editValue = v)}
+        />
       {/each}
     {:else}
       <div class="empty">No files found</div>
@@ -852,92 +910,6 @@
     overflow-y: auto;
     padding: 4px 0;
     outline: none;
-  }
-
-  .tree-row {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    color: #cccccc;
-    line-height: 1.4;
-    user-select: none;
-  }
-
-  .tree-row-inner {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex: 1;
-    width: 100%;
-    text-align: left;
-    background: none;
-    border: none;
-    color: inherit;
-    padding: 3px 8px;
-    cursor: pointer;
-    font-size: 13px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .tree-row:hover {
-    background: #2a2d2e;
-  }
-
-  .tree-row.selected {
-    background: #094771;
-    color: #ffffff;
-  }
-
-  .tree-row.cut {
-    opacity: 0.5;
-  }
-
-  .tree-row.drop-target {
-    background: #0e639c;
-    color: #ffffff;
-    outline: 1px dashed #4fc1ff;
-    outline-offset: -1px;
-  }
-
-  .chevron {
-    width: 12px;
-    text-align: center;
-    font-size: 10px;
-    color: #888;
-    flex-shrink: 0;
-  }
-
-  .icon {
-    width: 16px;
-    text-align: center;
-    flex-shrink: 0;
-  }
-
-  .name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .inline-edit {
-    flex: 1;
-    background: #1e1e1e;
-    border: 1px solid #007acc;
-    color: #fff;
-    padding: 1px 4px;
-    border-radius: 2px;
-    font-size: 13px;
-    font-family: inherit;
-    outline: none;
-    min-width: 0;
-  }
-
-  .edit-error {
-    color: #f48771;
-    font-size: 11px;
-    margin-left: 4px;
   }
 
   .empty {

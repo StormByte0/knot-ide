@@ -6,7 +6,7 @@ mod menu;
 mod watcher;
 
 use fs_ops::WorkspaceRoot;
-use lsp::LspSupervisor;
+use lsp::{LspSupervisor};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
@@ -36,8 +36,14 @@ pub fn run() {
                 tracing::warn!(error = %e, "failed to set up menu");
             }
             tauri::async_runtime::spawn(async move {
-                let state = app_handle.state::<LspSupervisor>();
-                if let Err(e) = lsp::spawn_server(app_handle.clone(), state).await {
+                // Extract Arcs from state in a block so the State<'_> borrow
+                // is dropped before spawn_server_impl is awaited — keeping the
+                // future `Send`. See lsp.rs docs for the rationale.
+                let arcs = {
+                    let state = app_handle.state::<LspSupervisor>();
+                    state.arcs()
+                };
+                if let Err(e) = lsp::spawn_server_impl(app_handle.clone(), arcs).await {
                     tracing::error!(error = %e, "failed to start knot-server on launch");
                     let _ = app_handle.emit("lsp-start-failed", e);
                 }
@@ -53,6 +59,7 @@ pub fn run() {
             fs_ops::list_dir,
             fs_ops::create_file,
             fs_ops::create_dir,
+            fs_ops::create_dir_all,
             fs_ops::rename_path,
             fs_ops::delete_path,
             fs_ops::copy_file,

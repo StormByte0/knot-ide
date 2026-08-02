@@ -39,9 +39,12 @@ which = "7"
 # Trash (cross-platform move-to-trash instead of permanent delete)
 trash = "5"
 
-# File watcher (cross-platform recursive FS events)
-notify = "7"
-notify-debouncer-mini = "0.5"
+# File watcher (cross-platform recursive FS events).
+# `full` (not `mini`) preserves EventKind (create/remove/rename/modify) and
+# pairs rename from/to events — the file browser needs kind info to skip
+# unnecessary refreshes on file-content-only `modify` events.
+# `notify` is re-exported by the debouncer, so no direct dep is needed.
+notify-debouncer-full = "0.5"
 
 [features]
 # Custom protocol (tauri dev uses vite dev server; tauri build uses embedded assets)

@@ -1,5 +1,10 @@
 <script lang="ts">
-  /** Right-click context menu for the file browser. */
+  /** Right-click context menu for the file browser.
+   *
+   *  Positions itself at `(x, y)` but clamps to the viewport so the menu
+   *  never gets clipped by window edges. Uses a `$effect` to measure the
+   *  rendered menu element after mount and adjust the position in-place.
+   */
 
   export interface MenuItem {
     id: string;
@@ -26,6 +31,37 @@
 
   let { x, y, items, onAction, onClose }: Props = $props();
 
+  /** The rendered menu element — bound via `bind:this`. */
+  let menuEl: HTMLDivElement;
+
+  /**
+   * After the menu renders, measure it and clamp the position so the menu
+   * stays fully visible within the viewport. Runs whenever `x`, `y`, or
+   * `items` change (different items = different menu height).
+   */
+  $effect(() => {
+    // Read props to register reactive dependencies.
+    const _x = x;
+    const _y = y;
+    const _items = items;
+    if (!menuEl) return;
+
+    const rect = menuEl.getBoundingClientRect();
+    const margin = 4;
+    let clampedX = _x;
+    let clampedY = _y;
+
+    if (clampedX + rect.width > window.innerWidth - margin) {
+      clampedX = Math.max(margin, window.innerWidth - rect.width - margin);
+    }
+    if (clampedY + rect.height > window.innerHeight - margin) {
+      clampedY = Math.max(margin, window.innerHeight - rect.height - margin);
+    }
+
+    menuEl.style.left = `${clampedX}px`;
+    menuEl.style.top = `${clampedY}px`;
+  });
+
   function handleClick(id: string) {
     onAction(id);
     onClose();
@@ -45,6 +81,7 @@
 <div class="context-backdrop" role="button" tabindex="-1" aria-label="Close menu" onclick={onClose} onkeydown={(e) => { if (e.key === 'Escape') onClose(); }} oncontextmenu={(e) => { e.preventDefault(); onClose(); }}></div>
 
 <div
+  bind:this={menuEl}
   class="context-menu"
   style="left: {x}px; top: {y}px;"
   role="menu"

@@ -149,6 +149,33 @@ pub async fn create_dir(
     Ok(validated.to_string_lossy().into_owned())
 }
 
+/// Create a directory and all intermediate parent directories.
+///
+/// Used by the file browser's "New File" / "New Folder" dialogs when the
+/// user types a path with slashes (e.g. `subfolder/deep/file.twee`). Unlike
+/// `create_dir`, this does NOT fail if intermediate directories already
+/// exist — only the final leaf must not exist as a non-directory.
+#[tauri::command]
+pub async fn create_dir_all(
+    path: String,
+    state: State<'_, WorkspaceRoot>,
+) -> Result<String, String> {
+    let root = state.0.lock().unwrap().clone();
+    let root = root.ok_or("workspace not set")?;
+    let validated = validate_in_workspace(&path, &root)?;
+
+    // create_dir_all succeeds if the dir already exists (unlike create_dir).
+    // We only reject if a non-directory file is blocking the path.
+    if validated.exists() && !validated.is_dir() {
+        return Err(format!(
+            "a file already exists at this path: {}",
+            validated.display()
+        ));
+    }
+    fs::create_dir_all(&validated).await.map_err(|e| e.to_string())?;
+    Ok(validated.to_string_lossy().into_owned())
+}
+
 /// Rename/move a file or directory. The new path must also be inside the
 /// workspace. Fails if the destination already exists.
 #[tauri::command]

@@ -25,7 +25,7 @@
   let workspaceFolder = $state<string | null>(null);
   let filePath = $state<string | null>(null);
   let fileContent = $state<string>('');
-  let lspStatus = $state<'idle' | 'starting' | 'ready' | 'failed' | 'exited'>('idle');
+  let lspStatus = $state<'idle' | 'starting' | 'ready' | 'restarting' | 'failed' | 'exited'>('idle');
   let lspError = $state<string>('');
 
   onMount(async () => {
@@ -41,6 +41,8 @@
     // Listen for LSP lifecycle events from the Rust backend.
     await listen('lsp-started', () => {
       console.log('[knot] lsp-started event received');
+      lspStatus = 'ready';
+      lspError = '';
     });
     await listen<string>('lsp-start-failed', (event) => {
       console.error('[knot] lsp-start-failed:', event.payload);
@@ -48,9 +50,16 @@
       lspError = event.payload;
     });
     await listen<number>('lsp-exited', (event) => {
-      console.warn('[knot] lsp-exited:', event.payload);
-      lspStatus = 'exited';
-      lspError = `knot-server exited with code ${event.payload}`;
+      // Server crashed — supervisor will auto-restart. Show "restarting" status.
+      console.warn('[knot] lsp-exited: code', event.payload, '— supervisor will restart');
+      lspStatus = 'restarting';
+      lspError = `knot-server exited (code ${event.payload}). Restarting…`;
+    });
+    await listen<string>('lsp-failed', (event) => {
+      // Supervisor gave up after MAX_RESTARTS attempts.
+      console.error('[knot] lsp-failed:', event.payload);
+      lspStatus = 'failed';
+      lspError = event.payload;
     });
 
     // Listen for native menu bar actions.
@@ -356,6 +365,7 @@
 
   .status-idle { color: #888; }
   .status-starting { color: #ffcc00; }
+  .status-restarting { color: #ffcc00; }
   .status-ready { color: #4ec9b0; }
   .status-failed, .status-exited { color: #f48771; }
 
