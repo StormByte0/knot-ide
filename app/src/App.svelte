@@ -17,18 +17,19 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import Editor from '$lib/editor/Editor.svelte';
+  import EditorTabs from '$lib/editor/EditorTabs.svelte';
   import FileBrowser from '$lib/filebrowser/FileBrowser.svelte';
   import StatusBar from '$lib/statusbar/StatusBar.svelte';
   import { initializeMonaco } from '$lib/editor/monaco-init';
   import { startLanguageClient } from '$lib/lsp/client';
   import { statusStore } from '$lib/statusbar/statusStore.svelte';
+  import { editorStore } from '$lib/editor/editorStore.svelte';
 
   // State (Svelte 5 runes).
   // LSP status + error live in `statusStore` so the StatusBar can read them
-  // directly. This component only keeps UI-local state here.
+  // directly. Open editor tabs live in `editorStore`. This component only
+  // keeps UI-local state here.
   let workspaceFolder = $state<string | null>(null);
-  let filePath = $state<string | null>(null);
-  let fileContent = $state<string>('');
   let monacoInitError = $state<string>('');
 
   onMount(async () => {
@@ -97,7 +98,7 @@
         console.log('[knot] find (not yet implemented)');
         break;
       case 'rename':
-        if (filePath) {
+        if (editorStore.activeTabId) {
           window.dispatchEvent(new CustomEvent('knot-rename'));
         }
         break;
@@ -161,10 +162,10 @@
     }
     try {
       const content = await readTextFile(path);
-      // Set content BEFORE filePath so the Editor's model-swap effect
-      // sees the new content when it creates the model.
-      fileContent = content;
-      filePath = path;
+      // Push into the editor store — it dedupes (already-open tab just
+      // activates) and tracks dirty state. The Editor reads the active
+      // tab's URI/content from the store reactively.
+      editorStore.openTab(path, content);
       console.log('[knot] opened file:', path, 'length:', content.length);
     } catch (err) {
       console.error('[knot] file read failed:', err);
@@ -173,16 +174,15 @@
     }
   }
 
-  // Compute the file:// URI for Monaco. On Windows, paths like `D:\path\file.twee`
-  // must become `file:///D:/path/file.twee` (forward slashes, triple slash).
-  let monacoUri = $derived.by(() => {
-    if (!filePath) return 'inmemory://knot/empty.twee';
-    if (filePath.startsWith('file://') || filePath.startsWith('inmemory://')) {
-      return filePath;
-    }
-    const normalized = filePath.replace(/\\/g, '/');
-    return `file://${normalized.startsWith('/') ? '' : '/'}${normalized}`;
-  });
+  // Reactive view of the active tab for the Editor. When the store's
+  // activeTab changes (user switches tab or closes the last one), the
+  // Editor's uri/content props update and its $effect swaps the Monaco model.
+  let activeUri = $derived(editorStore.activeTab?.uri ?? 'inmemory://knot/empty.twee');
+  let activeContent = $derived(editorStore.activeTab?.content ?? '');
+  let hasOpenTab = $derived(editorStore.activeTab !== null);
+
+  // The file browser highlights the file matching the active tab.
+  let activeFilePath = $derived(editorStore.activeTab?.path ?? null);
 </script>
 
 <div class="app">
@@ -214,13 +214,14 @@
       <aside class="sidebar">
         <FileBrowser
           folder={workspaceFolder}
-          currentFile={filePath}
+          currentFile={activeFilePath}
           onSelect={handleSelectFile}
         />
       </aside>
       <section class="editor-area">
-        {#if filePath}
-          <Editor uri={monacoUri} content={fileContent} />
+        <EditorTabs />
+        {#if hasOpenTab}
+          <Editor uri={activeUri} content={activeContent} />
         {:else}
           <div class="no-file">Select a file from the browser</div>
         {/if}
@@ -319,8 +320,15 @@
 
   .editor-area {
     flex: 1;
+    display: flex;
+    flex-direction: column;
     position: relative;
     overflow: hidden;
+  }
+
+  .editor-area > :global(.editor-container) {
+    flex: 1;
+    position: relative;
   }
 
   .no-file {

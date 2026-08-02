@@ -11,6 +11,7 @@
   import * as monaco from 'monaco-editor';
   import { initializeMonaco, TWEE_LANGUAGE_ID } from '$lib/editor/monaco-init';
   import { statusStore } from '$lib/statusbar/statusStore.svelte';
+  import { editorStore } from '$lib/editor/editorStore.svelte';
 
   interface Props {
     /** File URI in `file://` scheme. Required for LSP `didOpen`. */
@@ -53,9 +54,17 @@
 
     console.log('[knot] Monaco editor created for', uri, 'content length:', content.length);
 
-    // Notify the Svelte parent of content changes (for dirty-state tracking).
+    // Notify the editor store of content changes (for dirty-state tracking).
+    // The store updates the tab's `isDirty` flag + cached content; the
+    // tab strip re-renders to show the dirty dot.
     editor.onDidChangeModelContent(() => {
-      content = editor!.getValue();
+      const value = editor!.getValue();
+      // Update the local `content` prop so the parent's $derived stays in
+      // sync (used for model-swap comparisons on tab switch).
+      content = value;
+      if (currentUri) {
+        editorStore.markContentChanged(currentUri, value);
+      }
     });
 
     // Push the active file + language to the status store. The URI is the
@@ -86,7 +95,9 @@
     statusStore.clearActiveFile();
   });
 
-  // When the URI changes (different file opened), swap the model.
+  // When the URI changes (different tab activated), swap the Monaco model.
+  // The tab's content is read from the editor store so a previously-typed
+  // (unsaved) edit is preserved across tab switches.
   $effect(() => {
     // Track uri so the effect re-runs when it changes.
     const targetUri = uri;
@@ -97,14 +108,17 @@
 
     const monacoUri = monaco.Uri.parse(targetUri);
     let existing = monaco.editor.getModel(monacoUri);
+    // The store holds the latest known content (including unsaved edits).
+    const storeTab = editorStore.tabs.find((t) => t.uri === targetUri);
+    const expectedContent = storeTab?.content ?? content;
     if (!existing) {
       // Create a new model with the current content.
-      existing = monaco.editor.createModel(content, language, monacoUri);
-      console.log('[knot:editor] created new model, content length:', content.length);
+      existing = monaco.editor.createModel(expectedContent, language, monacoUri);
+      console.log('[knot:editor] created new model, content length:', expectedContent.length);
     } else {
       // Update existing model's content if it differs (e.g. file reload).
-      if (existing.getValue() !== content) {
-        existing.setValue(content);
+      if (existing.getValue() !== expectedContent) {
+        existing.setValue(expectedContent);
       }
     }
     model = existing;
