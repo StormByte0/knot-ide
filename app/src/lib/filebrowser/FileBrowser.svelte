@@ -862,8 +862,8 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: #252526;
-    color: #cccccc;
+    background: var(--bg-sidebar);
+    color: var(--fg-default);
     font-size: 13px;
     overflow: hidden;
   }
@@ -873,7 +873,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 8px 6px 12px;
-    border-bottom: 1px solid #3c3c3c;
+    border-bottom: 1px solid var(--border-default);
     flex-shrink: 0;
   }
 
@@ -882,7 +882,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: #bbbbbb;
+    color: var(--fg-subtle);
   }
 
   .toolbar-actions {
@@ -893,7 +893,7 @@
   .tool-btn {
     background: none;
     border: none;
-    color: #cccccc;
+    color: var(--fg-default);
     cursor: pointer;
     font-size: 14px;
     padding: 4px 6px;
@@ -902,7 +902,7 @@
   }
 
   .tool-btn:hover {
-    background: #3c3c3c;
+    background: var(--bg-hover);
   }
 
   .tree-container {
@@ -914,14 +914,14 @@
 
   .empty {
     padding: 16px 12px;
-    color: #888;
+    color: var(--fg-muted);
     font-size: 12px;
     text-align: center;
   }
 
   .error {
     padding: 12px;
-    color: #f48771;
+    color: var(--danger);
     font-size: 12px;
   }
 </style>

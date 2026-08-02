@@ -99,8 +99,8 @@
   }
 
   .dialog {
-    background: #252526;
-    border: 1px solid #3c3c3c;
+    background: var(--bg-context-menu);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
     padding: 16px 20px;
     min-width: 400px;
@@ -112,7 +112,7 @@
     font-size: 14px;
     font-weight: 600;
     margin: 0 0 12px 0;
-    color: #ffffff;
+    color: var(--fg-default);
   }
 
   .dialog-label {
@@ -120,13 +120,13 @@
     flex-direction: column;
     gap: 4px;
     font-size: 12px;
-    color: #aaa;
+    color: var(--fg-subtle);
   }
 
   .dialog-input {
-    background: #1e1e1e;
-    border: 1px solid #3c3c3c;
-    color: #fff;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    color: var(--fg-input);
     padding: 8px;
     border-radius: 4px;
     font-size: 13px;
@@ -135,7 +135,7 @@
   }
 
   .dialog-input:focus {
-    border-color: #007acc;
+    border-color: var(--accent);
   }
 
   .dialog-actions {
@@ -154,21 +154,21 @@
   }
 
   .btn-cancel {
-    background: #3c3c3c;
-    color: #ccc;
+    background: var(--bg-tab);
+    color: var(--fg-subtle);
   }
 
   .btn-cancel:hover {
-    background: #4c4c4c;
+    background: var(--bg-hover);
   }
 
   .btn-confirm {
-    background: #0e639c;
-    color: white;
+    background: var(--accent);
+    color: var(--fg-status-bar);
   }
 
   .btn-confirm:hover:not(:disabled) {
-    background: #1177bb;
+    background: var(--accent-hover);
   }
 
   .btn-confirm:disabled {

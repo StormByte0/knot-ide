@@ -158,7 +158,7 @@
     text-align: left;
     background: none;
     border: none;
-    color: #cccccc;
+    color: var(--fg-default);
     padding: 3px 8px;
     cursor: pointer;
     font-size: 13px;
@@ -170,12 +170,12 @@
   }
 
   .tree-row:hover {
-    background: #2a2d2e;
+    background: var(--bg-hover);
   }
 
   .tree-row.selected {
-    background: #094771;
-    color: #ffffff;
+    background: var(--bg-active-selection);
+    color: var(--fg-default);
   }
 
   .tree-row.cut {
@@ -183,9 +183,9 @@
   }
 
   .tree-row.drop-target {
-    background: #0e639c;
-    color: #ffffff;
-    outline: 1px dashed #4fc1ff;
+    background: var(--accent);
+    color: var(--fg-status-bar);
+    outline: 1px dashed var(--accent-hover);
     outline-offset: -1px;
   }
 
@@ -212,8 +212,8 @@
       to right,
       transparent 0,
       transparent 7px,
-      #3c3c3c 7px,
-      #3c3c3c 8px,
+      var(--border-default) 7px,
+      var(--border-default) 8px,
       transparent 8px,
       transparent 14px
     );
@@ -228,7 +228,7 @@
     width: 12px;
     text-align: center;
     font-size: 10px;
-    color: #888;
+    color: var(--fg-muted);
     flex-shrink: 0;
   }
 
@@ -247,9 +247,9 @@
 
   .inline-edit {
     flex: 1;
-    background: #1e1e1e;
-    border: 1px solid #007acc;
-    color: #fff;
+    background: var(--bg-input);
+    border: 1px solid var(--accent);
+    color: var(--fg-input);
     padding: 1px 4px;
     border-radius: 2px;
     font-size: 13px;
@@ -259,7 +259,7 @@
   }
 
   .edit-error {
-    color: #f48771;
+    color: var(--danger);
     font-size: 11px;
     margin-left: 4px;
   }

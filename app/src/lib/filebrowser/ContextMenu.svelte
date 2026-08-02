@@ -112,8 +112,8 @@
 
   .context-menu {
     position: fixed;
-    background: #252526;
-    border: 1px solid #454545;
+    background: var(--bg-context-menu);
+    border: 1px solid var(--border-default);
     border-radius: 4px;
     padding: 4px 0;
     min-width: 180px;
@@ -123,7 +123,7 @@
 
   .menu-separator {
     height: 1px;
-    background: #454545;
+    background: var(--border-default);
     margin: 4px 0;
   }
 
@@ -135,7 +135,7 @@
     text-align: left;
     background: none;
     border: none;
-    color: #cccccc;
+    color: var(--fg-context-menu);
     padding: 6px 12px;
     cursor: pointer;
     font-size: 13px;
@@ -143,17 +143,17 @@
   }
 
   .menu-item:hover {
-    background: #094771;
-    color: #ffffff;
+    background: var(--bg-active-selection);
+    color: var(--fg-default);
   }
 
   .menu-item.danger {
-    color: #f48771;
+    color: var(--danger);
   }
 
   .menu-item.danger:hover {
-    background: #5a1d1d;
-    color: #f48771;
+    background: color-mix(in srgb, var(--danger) 25%, transparent);
+    color: var(--danger);
   }
 
   .menu-icon {

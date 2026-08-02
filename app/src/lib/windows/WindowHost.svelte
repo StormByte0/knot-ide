@@ -43,6 +43,8 @@
     type SerializedTab,
   } from './windowManager';
   import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import { editorSettingsStore } from '$lib/settings/editorSettings.svelte';
+  import { themeStore } from '$lib/themes/themeStore.svelte';
 
   let ready = $state(false);
   let error = $state<string | null>(null);
@@ -72,6 +74,12 @@
       error = `Monaco init failed: ${err instanceof Error ? err.message : String(err)}`;
       return;
     }
+
+    // Load editor settings + init theme system (each window has its own
+    // editorSettingsStore/themeStore instance per JS context — matches the
+    // parent so the child looks consistent).
+    await editorSettingsStore.load();
+    themeStore.init();
 
     // Listen for the detached tab from the parent.
     // IMPORTANT: register the listener BEFORE signaling readiness. The parent
@@ -176,7 +184,7 @@
     width: 100vw;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #1e1e1e;
+    background: var(--bg-app);
   }
 
   .child-workspace {
@@ -190,11 +198,11 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: #888;
+    color: var(--fg-muted);
     font-size: 14px;
   }
 
   .child-error {
-    color: #f48771;
+    color: var(--danger);
   }
 </style>

@@ -82,19 +82,20 @@
 
   /* Base hover state — faint highlight so the user sees the zones. */
   .zone {
-    background: rgba(14, 99, 156, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
     opacity: 1;
   }
 
   /* Active zone — bright highlight. */
   .zone.active {
-    background: rgba(14, 99, 156, 0.4);
-    box-shadow: inset 0 0 0 2px #007acc;
+    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent);
   }
 
   .zone-label {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.7);
+    color: var(--fg-status-bar);
+    opacity: 0.7;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     pointer-events: none;
@@ -102,6 +103,6 @@
   }
 
   .zone.active .zone-label {
-    color: #fff;
+    opacity: 1;
   }
 </style>

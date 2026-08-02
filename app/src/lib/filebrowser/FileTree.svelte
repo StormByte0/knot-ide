@@ -57,7 +57,7 @@
     text-align: left;
     background: none;
     border: none;
-    color: #cccccc;
+    color: var(--fg-default);
     padding: 3px 8px 3px 8px;
     cursor: pointer;
     font-size: 13px;
@@ -70,19 +70,19 @@
   }
 
   .tree-row:hover {
-    background: #2a2d2e;
+    background: var(--bg-hover);
   }
 
   .tree-row.selected {
-    background: #094771;
-    color: #ffffff;
+    background: var(--bg-active-selection);
+    color: var(--fg-default);
   }
 
   .chevron {
     width: 12px;
     text-align: center;
     font-size: 10px;
-    color: #888;
+    color: var(--fg-muted);
     flex-shrink: 0;
   }
 

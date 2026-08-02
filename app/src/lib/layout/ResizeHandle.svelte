@@ -76,13 +76,13 @@
 <style>
   .resize-handle {
     flex-shrink: 0;
-    background: #1e1e1e;
+    background: var(--border-subtle);
     transition: background 0.1s;
   }
 
   .resize-handle:hover,
   .resize-handle.dragging {
-    background: #007acc;
+    background: var(--accent);
   }
 
   /* Horizontal split → handle is a vertical bar (cursor: col-resize). */

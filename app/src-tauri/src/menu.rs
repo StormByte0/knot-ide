@@ -48,6 +48,9 @@ pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         &Submenu::with_items(app, "View", true, &[
             &MenuItem::with_id(app, "toggle-file-browser", "Toggle File Browser", true, Some("Ctrl+Shift+E"))?,
             &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "theme-dark", "Theme: Knot Dark", true, None::<&str>)?,
+            &MenuItem::with_id(app, "theme-light", "Theme: Knot Light", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "zoom-in", "Zoom In", true, Some("Ctrl+="))?,
             &MenuItem::with_id(app, "zoom-out", "Zoom Out", true, Some("Ctrl+-"))?,
             &MenuItem::with_id(app, "reset-zoom", "Reset Zoom", true, Some("Ctrl+0"))?,

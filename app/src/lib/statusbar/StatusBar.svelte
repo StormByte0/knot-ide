@@ -136,8 +136,8 @@
     gap: 16px;
     padding: 0 8px;
     height: 26px;
-    background: #007acc;
-    color: #fff;
+    background: var(--bg-status-bar);
+    color: var(--fg-status-bar);
     flex-shrink: 0;
     overflow: hidden;
   }

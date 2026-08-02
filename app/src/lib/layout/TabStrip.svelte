@@ -240,8 +240,8 @@
     display: flex;
     align-items: stretch;
     height: 36px;
-    background: #252526;
-    border-bottom: 1px solid #1e1e1e;
+    background: var(--bg-tab-strip);
+    border-bottom: 1px solid var(--border-subtle);
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: thin;
@@ -250,8 +250,8 @@
 
   .tab-strip-empty {
     height: 36px;
-    background: #252526;
-    border-bottom: 1px solid #1e1e1e;
+    background: var(--bg-tab-strip);
+    border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
   }
 
@@ -262,10 +262,10 @@
     padding: 0 10px;
     min-width: 100px;
     max-width: 240px;
-    background: #2d2d2d;
-    color: #969696;
+    background: var(--bg-tab);
+    color: var(--fg-tab);
     border: none;
-    border-right: 1px solid #1e1e1e;
+    border-right: 1px solid var(--border-subtle);
     cursor: pointer;
     font-size: 13px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -274,13 +274,13 @@
   }
 
   .tab:hover {
-    background: #343434;
-    color: #cccccc;
+    background: var(--bg-hover);
+    color: var(--fg-default);
   }
 
   .tab.active {
-    background: #1e1e1e;
-    color: #ffffff;
+    background: var(--bg-tab-active);
+    color: var(--fg-tab-active);
   }
 
   .tab.dragging {
@@ -294,7 +294,7 @@
     left: 0;
     right: 0;
     height: 1px;
-    background: #007acc;
+    background: var(--accent);
   }
 
   .tab-name {
@@ -312,29 +312,29 @@
     border-radius: 3px;
     font-size: 16px;
     line-height: 1;
-    color: #888;
+    color: var(--fg-muted);
     cursor: pointer;
     flex-shrink: 0;
   }
 
   .tab-close:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: #fff;
+    background: var(--bg-hover);
+    color: var(--fg-default);
   }
 
   .dirty-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #cccccc;
+    background: var(--fg-default);
     display: inline-block;
   }
 
   .ctx-menu {
     position: fixed;
     z-index: 1000;
-    background: #252526;
-    border: 1px solid #454545;
+    background: var(--bg-context-menu);
+    border: 1px solid var(--border-default);
     border-radius: 4px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
     padding: 4px 0;
@@ -346,7 +346,7 @@
   .ctx-menu button {
     background: none;
     border: none;
-    color: #cccccc;
+    color: var(--fg-context-menu);
     text-align: left;
     padding: 6px 16px;
     font-size: 13px;
@@ -355,13 +355,13 @@
   }
 
   .ctx-menu button:hover {
-    background: #094771;
-    color: #fff;
+    background: var(--bg-active-selection);
+    color: var(--fg-default);
   }
 
   .ctx-separator {
     height: 1px;
-    background: #3c3c3c;
+    background: var(--border-default);
     margin: 4px 0;
   }
 </style>

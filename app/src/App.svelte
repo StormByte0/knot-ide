@@ -36,6 +36,7 @@
   import { layoutStore } from '$lib/layout/layoutStore.svelte';
   import { editorSettingsStore } from '$lib/settings/editorSettings.svelte';
   import { migrateVscodeConfig } from '$lib/settings/projectSettings';
+  import { themeStore } from '$lib/themes/themeStore.svelte';
   import WindowHost from '$lib/windows/WindowHost.svelte';
   import { isChildWindow, closeAllChildWindows, broadcastCloseToChildren } from '$lib/windows/windowManager';
 
@@ -104,6 +105,10 @@
     // Load editor settings (global, per-user) on startup.
     await editorSettingsStore.load();
 
+    // Initialize the theme system (reads preference from editor settings,
+    // registers Monaco themes, applies the active theme).
+    themeStore.init();
+
     // When the parent window is closing, broadcast to all child windows
     // so they can close too (Tauri does NOT auto-close children).
     window.addEventListener('beforeunload', () => {
@@ -134,6 +139,12 @@
         break;
       case 'settings':
         showSettings = true;
+        break;
+      case 'theme-dark':
+        themeStore.setTheme('knot-dark');
+        break;
+      case 'theme-light':
+        themeStore.setTheme('knot-light');
         break;
       case 'find':
         console.log('[knot] find (not yet implemented)');
@@ -283,9 +294,9 @@
     align-items: center;
     gap: 12px;
     padding: 8px 12px;
-    background: #1e1e1e;
-    color: #ccc;
-    border-bottom: 1px solid #333;
+    background: var(--bg-toolbar);
+    color: var(--fg-subtle);
+    border-bottom: 1px solid var(--border-default);
     flex-shrink: 0;
   }
 
@@ -296,7 +307,7 @@
 
   .folder-name {
     font-size: 12px;
-    color: #888;
+    color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -307,29 +318,29 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #1e1e1e;
+    background: var(--bg-app);
   }
 
   .welcome-content {
     text-align: center;
-    color: #cccccc;
+    color: var(--fg-default);
   }
 
   .welcome-content h1 {
     font-size: 48px;
     margin-bottom: 8px;
-    color: #4fc1ff;
+    color: var(--accent);
   }
 
   .welcome-content p {
     font-size: 14px;
-    color: #888;
+    color: var(--fg-muted);
     margin-bottom: 24px;
   }
 
   .open-folder-btn {
-    background: #0e639c;
-    color: white;
+    background: var(--accent);
+    color: var(--fg-status-bar);
     border: none;
     padding: 10px 20px;
     border-radius: 4px;
@@ -338,7 +349,7 @@
   }
 
   .open-folder-btn:hover {
-    background: #1177bb;
+    background: var(--accent-hover);
   }
 
   .workspace {
@@ -347,7 +358,7 @@
   }
 
   .error {
-    color: #f48771;
+    color: var(--danger);
     margin-top: 16px;
   }
 </style>

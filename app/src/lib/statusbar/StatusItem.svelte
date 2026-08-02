@@ -54,7 +54,7 @@
     padding: 0 6px;
     height: 100%;
     font-size: 12px;
-    color: #fff;
+    color: var(--fg-status-bar);
     background: transparent;
     border: none;
     cursor: default;
@@ -68,23 +68,24 @@
   }
 
   button.status-item:hover {
-    background: rgba(255, 255, 255, 0.12);
+    background: color-mix(in srgb, var(--fg-status-bar) 12%, transparent);
   }
 
   .label {
-    color: rgba(255, 255, 255, 0.7);
+    color: color-mix(in srgb, var(--fg-status-bar) 70%, transparent);
   }
 
   .value {
-    color: #fff;
+    color: var(--fg-status-bar);
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  /* Tone → color. Only the value gets the tone color; the label stays muted. */
-  .tone-default .value { color: #fff; }
-  .tone-idle .value { color: rgba(255, 255, 255, 0.55); }
-  .tone-warning .value { color: #ffcc00; }
-  .tone-success .value { color: #4ec9b0; }
-  .tone-error .value { color: #f48771; }
+  /* Tone → color. Only the value gets the tone color; the label stays muted.
+     Use color-mix with the status bar fg so tones are readable on any bar bg. */
+  .tone-default .value { color: var(--fg-status-bar); }
+  .tone-idle .value { color: color-mix(in srgb, var(--fg-status-bar) 55%, transparent); }
+  .tone-warning .value { color: var(--warning); }
+  .tone-success .value { color: var(--success); }
+  .tone-error .value { color: var(--danger); }
 </style>

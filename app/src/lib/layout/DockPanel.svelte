@@ -181,12 +181,14 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
+    background: var(--bg-editor);
   }
 
   .panel-content {
     flex: 1;
     position: relative;
     overflow: hidden;
+    background: var(--bg-editor);
   }
 
   .empty-panel {
@@ -194,7 +196,7 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: #666;
+    color: var(--fg-muted);
     font-size: 14px;
     user-select: none;
   }
@@ -205,7 +207,7 @@
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: #888;
+    color: var(--fg-muted);
     font-size: 14px;
     gap: 4px;
     user-select: none;
@@ -213,6 +215,6 @@
 
   .placeholder-hint {
     font-size: 12px;
-    color: #555;
+    color: var(--fg-muted);
   }
 </style>

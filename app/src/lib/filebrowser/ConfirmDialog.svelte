@@ -68,8 +68,8 @@
   }
 
   .dialog {
-    background: #252526;
-    border: 1px solid #3c3c3c;
+    background: var(--bg-context-menu);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
     padding: 16px 20px;
     min-width: 400px;
@@ -81,12 +81,12 @@
     font-size: 14px;
     font-weight: 600;
     margin: 0 0 8px 0;
-    color: #ffffff;
+    color: var(--fg-default);
   }
 
   .dialog-message {
     font-size: 13px;
-    color: #cccccc;
+    color: var(--fg-subtle);
     margin: 0 0 16px 0;
     line-height: 1.4;
   }
@@ -106,28 +106,29 @@
   }
 
   .btn-cancel {
-    background: #3c3c3c;
-    color: #ccc;
+    background: var(--bg-tab);
+    color: var(--fg-subtle);
   }
 
   .btn-cancel:hover {
-    background: #4c4c4c;
+    background: var(--bg-hover);
   }
 
   .btn-confirm {
-    background: #0e639c;
-    color: white;
+    background: var(--accent);
+    color: var(--fg-status-bar);
   }
 
   .btn-confirm:hover {
-    background: #1177bb;
+    background: var(--accent-hover);
   }
 
   .btn-confirm.danger {
-    background: #a1260d;
+    background: var(--danger);
   }
 
   .btn-confirm.danger:hover {
-    background: #c42b1a;
+    background: var(--danger);
+    filter: brightness(1.2);
   }
 </style>

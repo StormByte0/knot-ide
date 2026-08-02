@@ -21,6 +21,8 @@
     migrateVscodeConfig,
   } from './projectSettings';
   import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from './types';
+  import { themeStore } from '$lib/themes/themeStore.svelte';
+  import { BUILT_IN_THEMES } from '$lib/themes/themes';
 
   interface Props {
     /** Workspace root path (for project settings). `null` if no workspace open. */
@@ -217,6 +219,19 @@
       <span>Bracket Pair Colorization</span>
     </label>
 
+    <label class="setting">
+      <span class="setting-label">Theme</span>
+      <select
+        class="setting-input"
+        value={themeStore.activeThemeId}
+        onchange={(e) => themeStore.setTheme(e.currentTarget.value)}
+      >
+        {#each Object.values(BUILT_IN_THEMES) as theme (theme.id)}
+          <option value={theme.id}>{theme.name}</option>
+        {/each}
+      </select>
+    </label>
+
     <div class="setting">
       <span class="setting-label">Tweego Path</span>
       <div class="setting-row">
@@ -304,8 +319,8 @@
   }
 
   .dialog {
-    background: #252526;
-    border: 1px solid #3c3c3c;
+    background: var(--bg-context-menu);
+    border: 1px solid var(--border-default);
     border-radius: 6px;
     min-width: 520px;
     max-width: 600px;
@@ -320,20 +335,20 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid #3c3c3c;
+    border-bottom: 1px solid var(--border-default);
   }
 
   .dialog-header h2 {
     font-size: 15px;
     font-weight: 600;
-    color: #fff;
+    color: var(--fg-default);
     margin: 0;
   }
 
   .close-btn {
     background: none;
     border: none;
-    color: #888;
+    color: var(--fg-muted);
     font-size: 20px;
     cursor: pointer;
     padding: 0 4px;
@@ -341,19 +356,19 @@
   }
 
   .close-btn:hover {
-    color: #fff;
+    color: var(--fg-default);
   }
 
   .tab-bar {
     display: flex;
-    border-bottom: 1px solid #3c3c3c;
+    border-bottom: 1px solid var(--border-default);
     padding: 0 16px;
   }
 
   .tab-btn {
     background: none;
     border: none;
-    color: #969696;
+    color: var(--fg-muted);
     padding: 8px 16px;
     cursor: pointer;
     font-size: 13px;
@@ -362,12 +377,12 @@
   }
 
   .tab-btn:hover {
-    color: #ccc;
+    color: var(--fg-subtle);
   }
 
   .tab-btn.active {
-    color: #fff;
-    border-bottom-color: #007acc;
+    color: var(--fg-default);
+    border-bottom-color: var(--accent);
   }
 
   .tab-btn:disabled {
@@ -395,13 +410,13 @@
 
   .setting-label {
     font-size: 12px;
-    color: #969696;
+    color: var(--fg-muted);
   }
 
   .setting-input {
-    background: #1e1e1e;
-    border: 1px solid #3c3c3c;
-    color: #ccc;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    color: var(--fg-input);
     padding: 6px 8px;
     border-radius: 3px;
     font-size: 13px;
@@ -410,7 +425,7 @@
   }
 
   .setting-input:focus {
-    border-color: #007acc;
+    border-color: var(--accent);
   }
 
   .setting-checkbox {
@@ -420,12 +435,12 @@
   }
 
   .setting-checkbox input {
-    accent-color: #007acc;
+    accent-color: var(--accent);
   }
 
   .setting-checkbox span {
     font-size: 13px;
-    color: #ccc;
+    color: var(--fg-subtle);
   }
 
   .setting-row {
@@ -442,7 +457,7 @@
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;
-    border-top: 1px solid #3c3c3c;
+    border-top: 1px solid var(--border-default);
   }
 
   .btn {
@@ -455,12 +470,12 @@
   }
 
   .btn-primary {
-    background: #0e639c;
-    color: white;
+    background: var(--accent);
+    color: var(--fg-status-bar);
   }
 
   .btn-primary:hover {
-    background: #1177bb;
+    background: var(--accent-hover);
   }
 
   .btn-primary:disabled {
@@ -469,32 +484,32 @@
   }
 
   .btn-cancel {
-    background: #3c3c3c;
-    color: #ccc;
+    background: var(--bg-tab);
+    color: var(--fg-subtle);
   }
 
   .btn-cancel:hover {
-    background: #4c4c4c;
+    background: var(--bg-hover);
   }
 
   .btn-small {
-    background: #3c3c3c;
-    color: #ccc;
+    background: var(--bg-tab);
+    color: var(--fg-subtle);
     padding: 6px 10px;
     font-size: 12px;
   }
 
   .btn-small:hover {
-    background: #4c4c4c;
+    background: var(--bg-hover);
   }
 
   .error {
-    color: #f48771;
+    color: var(--danger);
     font-size: 13px;
   }
 
   .loading {
-    color: #888;
+    color: var(--fg-muted);
     font-size: 13px;
   }
 </style>

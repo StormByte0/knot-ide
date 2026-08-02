@@ -15,3 +15,45 @@ body {
   height: 100vh;
   width: 100vw;
 }
+
+/*
+ * Global scrollbar styling — theme-aware via CSS variables.
+ * Tauri uses WebView2 (Chromium) on Windows, so ::-webkit-scrollbar works.
+ * Firefox uses `scrollbar-color` (set per-component via scrollbar-width).
+ */
+:root {
+  --scrollbar-thumb: color-mix(in srgb, var(--fg-default) 25%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--fg-default) 40%, transparent);
+  --scrollbar-track: transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
+}
+
+/* Firefox fallback (not used in Tauri, but for dev browser testing) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
