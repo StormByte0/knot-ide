@@ -8,6 +8,7 @@
 
   import type { TreeNode } from './types';
   import { getFileIcon } from './icons';
+  import FileTree from './FileTree.svelte';
 
   interface Props {
     nodes: TreeNode[];

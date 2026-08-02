@@ -10,6 +10,7 @@
   import { onMount, onDestroy } from 'svelte';
   import * as monaco from 'monaco-editor';
   import { initializeMonaco, TWEE_LANGUAGE_ID } from '$lib/editor/monaco-init';
+  import { statusStore } from '$lib/statusbar/statusStore.svelte';
 
   interface Props {
     /** File URI in `file://` scheme. Required for LSP `didOpen`. */
@@ -57,6 +58,21 @@
       content = editor!.getValue();
     });
 
+    // Push the active file + language to the status store. The URI is the
+    // source of truth for "what's being edited"; the language prop tells
+    // the status bar which language label to show.
+    statusStore.setActiveFile(uri, language);
+
+    // Push the initial cursor position (1:1 on a fresh model) and subscribe
+    // to future moves so the status bar tracks line:col live.
+    const pos = editor.getPosition();
+    if (pos) {
+      statusStore.setCursorPosition(pos.lineNumber, pos.column);
+    }
+    editor.onDidChangeCursorPosition((e) => {
+      statusStore.setCursorPosition(e.position.lineNumber, e.position.column);
+    });
+
     currentUri = uri;
   });
 
@@ -65,6 +81,9 @@
     model?.dispose();
     editor = null;
     model = null;
+    // Clear active-file state so the status bar doesn't show a stale file
+    // after the editor is destroyed (e.g. user closed the last tab).
+    statusStore.clearActiveFile();
   });
 
   // When the URI changes (different file opened), swap the model.
@@ -90,6 +109,13 @@
     }
     model = existing;
     editor.setModel(model);
+
+    // Sync the status store with the newly-active file + language.
+    statusStore.setActiveFile(targetUri, language);
+    const pos = editor.getPosition();
+    if (pos) {
+      statusStore.setCursorPosition(pos.lineNumber, pos.column);
+    }
   });
 </script>
 

@@ -18,15 +18,18 @@
   import { listen } from '@tauri-apps/api/event';
   import Editor from '$lib/editor/Editor.svelte';
   import FileBrowser from '$lib/filebrowser/FileBrowser.svelte';
+  import StatusBar from '$lib/statusbar/StatusBar.svelte';
   import { initializeMonaco } from '$lib/editor/monaco-init';
   import { startLanguageClient } from '$lib/lsp/client';
+  import { statusStore } from '$lib/statusbar/statusStore.svelte';
 
   // State (Svelte 5 runes).
+  // LSP status + error live in `statusStore` so the StatusBar can read them
+  // directly. This component only keeps UI-local state here.
   let workspaceFolder = $state<string | null>(null);
   let filePath = $state<string | null>(null);
   let fileContent = $state<string>('');
-  let lspStatus = $state<'idle' | 'starting' | 'ready' | 'restarting' | 'failed' | 'exited'>('idle');
-  let lspError = $state<string>('');
+  let monacoInitError = $state<string>('');
 
   onMount(async () => {
     // Initialize Monaco (registers the Twee language + grammar).
@@ -35,31 +38,30 @@
       console.log('[knot] Monaco initialized');
     } catch (err) {
       console.error('[knot] Monaco init failed:', err);
-      lspError = `Monaco init failed: ${err instanceof Error ? err.message : String(err)}`;
+      monacoInitError = `Monaco init failed: ${err instanceof Error ? err.message : String(err)}`;
+      statusStore.setLspStatus('failed', monacoInitError);
     }
 
     // Listen for LSP lifecycle events from the Rust backend.
+    // These push directly into `statusStore` so the StatusBar reflects the
+    // supervisor's state without any local mirror here.
     await listen('lsp-started', () => {
       console.log('[knot] lsp-started event received');
-      lspStatus = 'ready';
-      lspError = '';
+      statusStore.setLspStatus('ready');
     });
     await listen<string>('lsp-start-failed', (event) => {
       console.error('[knot] lsp-start-failed:', event.payload);
-      lspStatus = 'failed';
-      lspError = event.payload;
+      statusStore.setLspStatus('failed', event.payload);
     });
     await listen<number>('lsp-exited', (event) => {
       // Server crashed — supervisor will auto-restart. Show "restarting" status.
       console.warn('[knot] lsp-exited: code', event.payload, '— supervisor will restart');
-      lspStatus = 'restarting';
-      lspError = `knot-server exited (code ${event.payload}). Restarting…`;
+      statusStore.setLspStatus('restarting', `knot-server exited (code ${event.payload}). Restarting…`);
     });
     await listen<string>('lsp-failed', (event) => {
       // Supervisor gave up after MAX_RESTARTS attempts.
       console.error('[knot] lsp-failed:', event.payload);
-      lspStatus = 'failed';
-      lspError = event.payload;
+      statusStore.setLspStatus('failed', event.payload);
     });
 
     // Listen for native menu bar actions.
@@ -126,7 +128,8 @@
     if (typeof selected !== 'string') return;
 
     workspaceFolder = selected;
-    lspStatus = 'starting';
+    statusStore.setProjectName(basename(selected));
+    statusStore.setLspStatus('starting');
     console.log('[knot] workspace folder:', selected);
 
     // Tell the Rust backend the workspace root (for path validation in fs_ops).
@@ -136,12 +139,17 @@
     try {
       await startLanguageClient(selected);
       console.log('[knot] LanguageClient started');
-      lspStatus = 'ready';
+      statusStore.setLspStatus('ready');
     } catch (err) {
       console.error('[knot] LanguageClient start failed:', err);
-      lspStatus = 'failed';
-      lspError = err instanceof Error ? err.message : String(err);
+      statusStore.setLspStatus('failed', err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /** Cross-platform basename: `D:\projects\my-game` → `my-game`. */
+  function basename(path: string): string {
+    const parts = path.split(/[/\\]/);
+    return parts[parts.length - 1] || path;
   }
 
   async function handleSelectFile(path: string) {
@@ -157,11 +165,11 @@
       // sees the new content when it creates the model.
       fileContent = content;
       filePath = path;
-      lspError = '';
       console.log('[knot] opened file:', path, 'length:', content.length);
     } catch (err) {
       console.error('[knot] file read failed:', err);
-      lspError = `Failed to read file: ${err instanceof Error ? err.message : String(err)}`;
+      // Surface the error in the status bar without clobbering LSP status.
+      statusStore.setLspStatus(statusStore.lspStatus, `Failed to read file: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -195,8 +203,8 @@
         <button class="open-folder-btn" onclick={handleOpenFolder}>
           Open Project Folder…
         </button>
-        {#if lspError}
-          <p class="error">{lspError}</p>
+        {#if monacoInitError}
+          <p class="error">{monacoInitError}</p>
         {/if}
       </div>
     </main>
@@ -220,15 +228,7 @@
     </main>
   {/if}
 
-  <footer class="status-bar">
-    <span class="status-item">
-      LSP:
-      <span class="status-{lspStatus}">{lspStatus}</span>
-    </span>
-    {#if lspError}
-      <span class="status-item error">{lspError}</span>
-    {/if}
-  </footer>
+  <StatusBar />
 </div>
 
 <style>
@@ -250,20 +250,6 @@
     color: #ccc;
     border-bottom: 1px solid #333;
     flex-shrink: 0;
-  }
-
-  .toolbar button {
-    background: #0e639c;
-    color: white;
-    border: none;
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-  }
-
-  .toolbar button:hover {
-    background: #1177bb;
   }
 
   .app-title {
@@ -344,35 +330,5 @@
     height: 100%;
     color: #666;
     font-size: 14px;
-  }
-
-  .status-bar {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 4px 12px;
-    background: #007acc;
-    color: white;
-    font-size: 12px;
-    flex-shrink: 0;
-  }
-
-  .status-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .status-idle { color: #888; }
-  .status-starting { color: #ffcc00; }
-  .status-restarting { color: #ffcc00; }
-  .status-ready { color: #4ec9b0; }
-  .status-failed, .status-exited { color: #f48771; }
-
-  .error {
-    color: #f48771;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

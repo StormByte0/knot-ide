@@ -1,0 +1,90 @@
+<script lang="ts">
+  /**
+   * Single status bar item.
+   *
+   * Pure presentation: a label prefix, a value, an optional tone for state
+   * coloring, and an optional click handler. Owns no state. Reads nothing
+   * from the store — the parent ({@link StatusBar.svelte}) decides what to
+   * render and passes it down as props.
+   *
+   * ## Why a separate component
+   *
+   * Every item in the bar shares the same DOM structure (span + value span),
+   * the same hover affordance, and the same tone → class mapping. Centralizing
+   * it here keeps {@link StatusBar.svelte} focused on **what to show** rather
+   * than **how to render each row** (CONVENTIONS §2.3 — single responsibility).
+   */
+
+  /** Visual tone for the value. Maps to a CSS class for color. */
+  type Tone = 'default' | 'idle' | 'warning' | 'success' | 'error';
+
+  interface Props {
+    /** Prefix label, e.g. `"LSP:"`. Rendered muted before the value. */
+    label?: string;
+    /** Main value text. */
+    value: string;
+    /** Tone for the value. Defaults to `'default'` (white). */
+    tone?: Tone;
+    /** Tooltip on hover. */
+    title?: string;
+    /** Click handler. When provided, the item renders as a button. */
+    onclick?: () => void;
+  }
+
+  let { label, value, tone = 'default', title, onclick }: Props = $props();
+</script>
+
+{#if onclick}
+  <button class="status-item tone-{tone}" {title} {onclick} type="button">
+    {#if label}<span class="label">{label}</span>{/if}
+    <span class="value">{value}</span>
+  </button>
+{:else}
+  <span class="status-item tone-{tone}" {title}>
+    {#if label}<span class="label">{label}</span>{/if}
+    <span class="value">{value}</span>
+  </span>
+{/if}
+
+<style>
+  .status-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 6px;
+    height: 100%;
+    font-size: 12px;
+    color: #fff;
+    background: transparent;
+    border: none;
+    cursor: default;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  button.status-item {
+    cursor: pointer;
+  }
+
+  button.status-item:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .label {
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .value {
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Tone → color. Only the value gets the tone color; the label stays muted. */
+  .tone-default .value { color: #fff; }
+  .tone-idle .value { color: rgba(255, 255, 255, 0.55); }
+  .tone-warning .value { color: #ffcc00; }
+  .tone-success .value { color: #4ec9b0; }
+  .tone-error .value { color: #f48771; }
+</style>
