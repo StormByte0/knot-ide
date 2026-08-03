@@ -6,9 +6,11 @@ mod lsp;
 mod menu;
 mod settings;
 mod watcher;
+mod window_state;
+mod workspace;
 
 use fs_ops::WorkspaceRoot;
-use lsp::{LspSupervisor};
+use lsp::LspSupervisor;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
@@ -18,7 +20,8 @@ use watcher::WatcherState;
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,knot_app_lib=debug")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,knot_app_lib=debug")),
         )
         .init();
 
@@ -65,6 +68,8 @@ pub fn run() {
             fs_ops::rename_path,
             fs_ops::delete_path,
             fs_ops::copy_file,
+            fs_ops::read_file,
+            fs_ops::write_file,
             fs_ops::set_workspace_root,
             watcher::watch_workspace,
             watcher::stop_watching,
@@ -74,6 +79,9 @@ pub fn run() {
             settings::load_editor_settings,
             settings::save_editor_settings,
             settings::detect_tweego,
+            settings::detect_tweego_version,
+            window_state::load_window_state,
+            window_state::save_window_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

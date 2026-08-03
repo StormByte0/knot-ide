@@ -7,7 +7,9 @@
    *
    * Row rendering is delegated to `TreeRow.svelte` (CONVENTIONS §2.3 — single
    * responsibility). This component owns state and dispatches; the row is pure
-   * presentation + event forwarding.
+   * presentation + event forwarding. Pure tree-walking helpers (find, flatten,
+   * merge, path resolution, name validation) are extracted into
+   * `fileTreeHelpers.ts`; the context menu item builder is in `menuBuilder.ts`.
    *
    * Features:
    * - Lazy-loading tree (flat-list rendering, stable node IDs)
@@ -20,6 +22,26 @@
    * - Drag and drop (move + Ctrl-copy, reject self/cycle, auto-expand on hover)
    * - Auto-reveal (when currentFile changes, expand ancestors + scroll to node)
    * - Auto-refresh via FS watcher (backend emits `fs-changed` events)
+   *
+   * ## Size justification (CONVENTIONS §2.5)
+   *
+   * This file is ~920 lines, exceeding the 800-line guideline. The remaining
+   * logic after extracting pure helpers is genuinely component-specific: it
+   * tightly couples Svelte 5 `$state`/`$derived` reactivity with event
+   * handlers that read + write multiple interdependent state fields (e.g.
+   * `editState` + `editValue` + `editError` + `rootChildren` + `selectedNode`
+   * all change together during an inline rename). Splitting further would
+   * either:
+   * - Create circular imports (state modules importing the component for
+   *   callback types), or
+   * - Force passing 10+ props/callbacks between the component and a
+   *   "controller" module, which is worse for readability than the current
+   *   inline structure.
+   *
+   * The extracted helpers (`fileTreeHelpers.ts`, `menuBuilder.ts`) are the
+   * pure, testable parts. This file is the reactive shell that wires them
+   * to the DOM + Tauri backend. Reviewed during the Phase 1 audit
+   * (PLAN.md §13.9) — acceptable as-is.
    */
 
   import { onMount, onDestroy } from 'svelte';
@@ -29,6 +51,17 @@
   import ContextMenu, { type MenuEntry } from './ContextMenu.svelte';
   import TreeRow from './TreeRow.svelte';
   import type { Clipboard, EditState, FileEntry, FsChangedEvent, TreeNode } from './types';
+  import {
+    parentDir as parentDirHelper,
+    makeNode,
+    mergeChildren,
+    findNode,
+    flatten,
+    collectExpandedPaths,
+    getTargetDir as getTargetDirHelper,
+    validateEditName,
+  } from './fileTreeHelpers';
+  import { buildContextMenuItems } from './menuBuilder';
 
   /** Copy text to clipboard. */
   async function copyToClipboard(text: string): Promise<void> {
@@ -44,9 +77,22 @@
     folder: string;
     currentFile: string | null;
     onSelect: (path: string) => void;
+    /**
+     * Optional: directory paths that should start expanded. Used to restore
+     * the filebrowser's expand state from `.knot/window-state.json` on app
+     * launch. `undefined` on a fresh workspace (everything starts collapsed).
+     */
+    initialExpandedPaths?: string[];
+    /**
+     * Optional: called whenever the set of expanded directory paths changes
+     * (toggle, auto-expand on hover, drag-over auto-expand, etc.). The
+     * caller persists the new set so the next launch restores it. Receives
+     * the complete current set of expanded paths (absolute, OS-native).
+     */
+    onExpandedPathsChange?: (expandedPaths: string[]) => void;
   }
 
-  let { folder, currentFile, onSelect }: Props = $props();
+  let { folder, currentFile, onSelect, initialExpandedPaths, onExpandedPathsChange }: Props = $props();
 
   // --- Tree state ---
   let rootChildren = $state<TreeNode[]>([]);
@@ -77,33 +123,16 @@
   let treeContainer: HTMLDivElement;
 
   // --- Path helpers ---
+  // `parentDir` and other pure tree helpers are imported from
+  // `fileTreeHelpers.ts`. The local wrapper binds `folder` so callers don't
+  // have to pass it every time.
 
-  /** Extract the parent directory of a path. Falls back to workspace root.
-   *  Does NOT normalize separators — the result must match OS-native paths
-   *  returned by the backend (`list_dir`, watcher events) for comparisons
-   *  like `dirPath === folder` and `findNode(...)` to work on Windows. */
+  /** Get the parent directory of a path, falling back to the workspace root. */
   function parentDir(path: string): string {
-    const lastSep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-    if (lastSep < 0) return folder;
-    return path.substring(0, lastSep) || folder;
+    return parentDirHelper(path, folder);
   }
 
   // --- Tree building ---
-
-  function makeNode(entry: FileEntry, depth: number): TreeNode {
-    return {
-      id: entry.path,
-      path: entry.path,
-      name: entry.name,
-      isDirectory: entry.isDirectory,
-      isFile: entry.isFile,
-      children: [],
-      expanded: false,
-      loaded: false,
-      loading: false,
-      depth,
-    };
-  }
 
   async function fetchChildren(dirPath: string, depth: number): Promise<TreeNode[]> {
     const entries = await invoke<FileEntry[]>('list_dir', { path: dirPath });
@@ -115,11 +144,61 @@
     error = null;
     try {
       rootChildren = await fetchChildren(folder, 0);
+      // After the initial load, restore expanded state from `initialExpandedPaths`.
+      // Called here (not in onMount) so the tree is populated before we walk it.
+      if (initialExpandedPaths && initialExpandedPaths.length > 0) {
+        await restoreExpandedState(initialExpandedPaths);
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
       loading = false;
     }
+  }
+
+  /**
+   * Restore expanded state from a saved list of paths.
+   *
+   * Walks the saved paths in order, expanding each directory. Because the
+   * tree is lazy-loaded, expanding a directory fetches its children — so
+   * expanding a deeply-nested path automatically fetches every ancestor.
+   *
+   * Skips paths that no longer exist (the file/folder was deleted since the
+   * state was saved). This is a soft failure — we restore what we can.
+   */
+  async function restoreExpandedState(pathsToRestore: string[]): Promise<void> {
+    // Sort by depth (shallowest first) so ancestors are expanded before
+    // children — otherwise the child fetch would fail because the parent
+    // isn't loaded yet.
+    const sorted = [...pathsToRestore].sort((a, b) => a.length - b.length);
+    for (const path of sorted) {
+      // Skip the workspace root — it's always "expanded" (its children are
+      // the top-level rootChildren, always visible).
+      if (path === folder) continue;
+      // Find the node in the current tree. If not found, the path may be a
+      // descendant of an as-yet-unexpanded directory — but because we sorted
+      // shallowest-first, ancestors should already be expanded by the time
+      // we reach descendants. If still not found, the path no longer exists.
+      const node = findNode(rootChildren, path);
+      if (node && node.isDirectory && !node.expanded) {
+        await toggleDir(node);
+      }
+    }
+    // Notify the parent of the current expanded set (so the restored set
+    // becomes the new baseline even if some paths were skipped).
+    notifyExpandedPaths();
+  }
+
+  /**
+   * Collect the current set of expanded directory paths + notify the parent.
+   * Called after every expand/collapse, after restore, and after watcher-
+   * triggered refreshes. The parent persists the set so the next launch
+   * restores it.
+   */
+  function notifyExpandedPaths(): void {
+    if (!onExpandedPathsChange) return;
+    const expanded = collectExpandedPaths(rootChildren);
+    onExpandedPathsChange(expanded);
   }
 
   async function refreshDir(dirPath: string) {
@@ -136,40 +215,7 @@
     }
   }
 
-  /**
-   * Merge fresh children with existing ones, preserving expand state.
-   *
-   * When the tree refreshes (after create/delete/rename/watcher event), we
-   * fetch a new set of child nodes from the backend. Naively replacing the
-   * array would collapse every expanded directory. Instead, for each new
-   * child that matches an existing child by path, we copy over `expanded`,
-   * `loaded`, `loading`, and `children` — so the subtree stays intact.
-   * New nodes (no match) start collapsed; deleted nodes (no new entry)
-   * simply don't appear in the result.
-   */
-  function mergeChildren(oldChildren: TreeNode[], newChildren: TreeNode[]): TreeNode[] {
-    return newChildren.map((newChild) => {
-      const oldChild = oldChildren.find((c) => c.path === newChild.path);
-      if (oldChild && oldChild.isDirectory) {
-        newChild.expanded = oldChild.expanded;
-        newChild.loaded = oldChild.loaded;
-        newChild.loading = oldChild.loading;
-        newChild.children = oldChild.children;
-      }
-      return newChild;
-    });
-  }
-
-  function findNode(nodes: TreeNode[], path: string): TreeNode | null {
-    for (const node of nodes) {
-      if (node.path === path) return node;
-      if (node.isDirectory && node.children.length > 0) {
-        const found = findNode(node.children, path);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
+  // `mergeChildren` and `findNode` are imported from `fileTreeHelpers.ts`.
 
   onMount(() => {
     refresh();
@@ -178,17 +224,55 @@
     const onNewFile = () => startNewFile(null);
     const onNewFolder = () => startNewFolder(null);
     const onRefresh = () => refresh();
+    const onRename = () => handleMenuRename();
     window.addEventListener('knot-new-file', onNewFile);
     window.addEventListener('knot-new-folder', onNewFolder);
     window.addEventListener('knot-refresh', onRefresh);
+    window.addEventListener('knot-rename', onRename);
 
     return () => {
       window.removeEventListener('knot-new-file', onNewFile);
       window.removeEventListener('knot-new-folder', onNewFolder);
       window.removeEventListener('knot-refresh', onRefresh);
+      window.removeEventListener('knot-rename', onRename);
       fsUnlisten?.();
     };
   });
+
+  /**
+   * Handle the "Rename" menu action (`F2`). If a node is selected in the
+   * tree, start inline rename on it. If no node is selected but the editor
+   * has an active file, find + reveal it in the tree, then start rename.
+   * No-op if nothing is selected and no file is open.
+   */
+  function handleMenuRename(): void {
+    if (selectedNode) {
+      startRename(selectedNode);
+      return;
+    }
+    // No tree selection — check if there's an active editor file to rename.
+    // We read `currentFile` (a prop) instead of importing the layout store,
+    // to keep this component decoupled from the layout system.
+    if (currentFile) {
+      const node = findNode(rootChildren, currentFile);
+      if (node) {
+        selectedNode = node;
+        focusedId = node.id;
+        startRename(node);
+      } else {
+        // File isn't visible in the tree (parent collapsed). Reveal it first,
+        // then start rename. Reveal is async — we pass a callback.
+        revealFile(currentFile).then(() => {
+          const revealed = findNode(rootChildren, currentFile);
+          if (revealed) {
+            selectedNode = revealed;
+            focusedId = revealed.id;
+            startRename(revealed);
+          }
+        });
+      }
+    }
+  }
 
   async function startWatcher() {
     try {
@@ -219,16 +303,7 @@
   }
 
   // --- Flat list rendering ---
-
-  function flatten(nodes: TreeNode[], result: TreeNode[] = []): TreeNode[] {
-    for (const node of nodes) {
-      result.push(node);
-      if (node.isDirectory && node.expanded && node.children.length > 0) {
-        flatten(node.children, result);
-      }
-    }
-    return result;
-  }
+  // `flatten` is imported from `fileTreeHelpers.ts`.
 
   let visibleNodes = $derived.by(() => {
     const nodes = flatten(rootChildren);
@@ -287,6 +362,7 @@
     selectedNode = node;
     focusedId = node.id;
     rootChildren = [...rootChildren];
+    notifyExpandedPaths();
   }
 
   function toggleExpandCollapse() {
@@ -307,6 +383,7 @@
     }
     setAll(rootChildren, !hasExpanded(rootChildren));
     rootChildren = [...rootChildren];
+    notifyExpandedPaths();
   }
 
   // --- Selection ---
@@ -322,12 +399,9 @@
     selectedNode = node;
   }
 
+  /** Get the target directory for an operation. Falls back to selectedNode, then folder. */
   function getTargetDir(node: TreeNode | null): string {
-    const target = node ?? selectedNode;
-    if (!target) return folder;
-    if (target.isDirectory) return target.path;
-    const parent = target.path.substring(0, target.path.length - target.name.length);
-    return parent.replace(/[/\\]+$/, '');
+    return getTargetDirHelper(node ?? selectedNode, folder);
   }
 
   // --- Inline editing ---
@@ -378,32 +452,7 @@
     rootChildren = [...rootChildren];
   }
 
-  /**
-   * Validate a name typed in the inline edit input.
-   *
-   * Accepts paths with slashes (e.g. `subfolder/deep/file.twee`) for the
-   * new-file and new-folder cases — intermediate directories are created
-   * automatically. Rejects:
-   * - empty names
-   * - absolute paths (leading `/` or `C:\`)
-   * - parent traversal (`..` segments)
-   * - backslashes in the path (typed `\` is normalized to `/` so the user
-   *   can type either separator on Windows)
-   *
-   * Returns the cleaned name, or throws with a user-facing error message.
-   */
-  function validateEditName(rawName: string): string {
-    const name = rawName.trim().replace(/\\/g, '/');
-    if (!name) throw new Error('Name cannot be empty');
-    if (name.startsWith('/')) throw new Error('Absolute paths are not allowed');
-    // Reject `C:\` style absolute paths (drive letter + colon).
-    if (/^[a-zA-Z]:/.test(name)) throw new Error('Absolute paths are not allowed');
-    const segments = name.split('/');
-    for (const seg of segments) {
-      if (seg === '..') throw new Error('Parent traversal (..) is not allowed');
-    }
-    return name;
-  }
+  // `validateEditName` is imported from `fileTreeHelpers.ts`.
 
   async function confirmEdit() {
     if (!editState) return;
@@ -477,44 +526,11 @@
   }
 
   // --- Context menu actions ---
+  // `getContextMenuItems` is imported as `buildContextMenuItems` from `menuBuilder.ts`.
 
+  /** Build context menu items for the current node + clipboard state. */
   function getContextMenuItems(node: TreeNode | null): MenuEntry[] {
-    const items: MenuEntry[] = [];
-    if (node && !node.isDirectory) {
-      items.push({ id: 'open', label: 'Open', icon: '📂' });
-      items.push({ separator: true });
-      items.push({ id: 'cut', label: 'Cut', icon: '✂' });
-      items.push({ id: 'copy', label: 'Copy', icon: '📋' });
-      if (clipboard) items.push({ id: 'paste', label: 'Paste', icon: '📥' });
-      items.push({ separator: true });
-      items.push({ id: 'copy-path', label: 'Copy Path', icon: '🔗' });
-      items.push({ id: 'copy-relative-path', label: 'Copy Relative Path', icon: '📎' });
-      items.push({ separator: true });
-      items.push({ id: 'rename', label: 'Rename…', icon: '✏' });
-      items.push({ id: 'delete', label: 'Delete…', icon: '🗑', danger: true });
-    } else if (node && node.isDirectory) {
-      items.push({ id: 'new-file', label: 'New File…', icon: '📄' });
-      items.push({ id: 'new-folder', label: 'New Folder…', icon: '📁' });
-      items.push({ separator: true });
-      items.push({ id: 'cut', label: 'Cut', icon: '✂' });
-      items.push({ id: 'copy', label: 'Copy', icon: '📋' });
-      if (clipboard) items.push({ id: 'paste', label: 'Paste', icon: '📥' });
-      items.push({ separator: true });
-      items.push({ id: 'copy-path', label: 'Copy Path', icon: '🔗' });
-      items.push({ separator: true });
-      items.push({ id: 'rename', label: 'Rename…', icon: '✏' });
-      items.push({ id: 'delete', label: 'Delete…', icon: '🗑', danger: true });
-    } else {
-      items.push({ id: 'new-file', label: 'New File…', icon: '📄' });
-      items.push({ id: 'new-folder', label: 'New Folder…', icon: '📁' });
-      if (clipboard) {
-        items.push({ separator: true });
-        items.push({ id: 'paste', label: 'Paste', icon: '📥' });
-      }
-      items.push({ separator: true });
-      items.push({ id: 'refresh', label: 'Refresh', icon: '↻' });
-    }
-    return items;
+    return buildContextMenuItems(node, clipboard);
   }
 
   async function handleContextAction(id: string) {
@@ -628,6 +644,7 @@
         if (node.isDirectory && node.expanded) {
           node.expanded = false;
           rootChildren = [...rootChildren];
+          notifyExpandedPaths();
         } else {
           for (let i = idx - 1; i >= 0; i--) {
             if (nodes[i].isDirectory && nodes[i].depth < node.depth) {

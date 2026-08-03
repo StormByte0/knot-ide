@@ -257,6 +257,62 @@ pub async fn copy_file(
     Ok(dest_validated.to_string_lossy().into_owned())
 }
 
+/// Read a file's full contents as UTF-8 text. Used by the editor on tab
+/// restore (re-read from disk to avoid stale cached content — see
+/// `PLAN.md` §13.8) and by the "Revert File" action (future).
+///
+/// Returns the file contents as a string. Fails if the path is outside the
+/// workspace, the file doesn't exist, or it isn't valid UTF-8.
+#[tauri::command]
+pub async fn read_file(
+    path: String,
+    state: State<'_, WorkspaceRoot>,
+) -> Result<String, String> {
+    let root = state.0.lock().unwrap().clone();
+    let root = root.ok_or("workspace not set")?;
+    let validated = validate_in_workspace(&path, &root)?;
+    if !validated.exists() {
+        return Err(format!("file does not exist: {}", validated.display()));
+    }
+    if !validated.is_file() {
+        return Err(format!("not a file: {}", validated.display()));
+    }
+    fs::read_to_string(&validated)
+        .await
+        .map_err(|e| format!("failed to read file '{}': {e}", validated.display()))
+}
+
+/// Write text contents to a file. Used by the editor's Save action (`Ctrl+S`)
+/// — see `PLAN.md` §13.2. Overwrites the file if it exists; creates it if it
+/// doesn't (though in practice the editor only saves files that were opened
+/// from disk, so the file always exists).
+///
+/// The path must be inside the workspace root. Returns the canonicalized
+/// path that was written (so the frontend can update the tab's path if the
+/// filesystem canonicalized it differently, e.g. resolved a symlink).
+#[tauri::command]
+pub async fn write_file(
+    path: String,
+    contents: String,
+    state: State<'_, WorkspaceRoot>,
+) -> Result<String, String> {
+    let root = state.0.lock().unwrap().clone();
+    let root = root.ok_or("workspace not set")?;
+    let validated = validate_in_workspace(&path, &root)?;
+    // Create parent directories if they don't exist (handles the rare case
+    // of saving a file whose parent dir was deleted externally). Most saves
+    // hit an existing file, so this is a no-op in the common path.
+    if let Some(parent) = validated.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create parent directory: {e}"))?;
+    }
+    fs::write(&validated, &contents)
+        .await
+        .map_err(|e| format!("failed to write file '{}': {e}", validated.display()))?;
+    Ok(validated.to_string_lossy().into_owned())
+}
+
 /// Set the workspace root path. Called by the frontend when a folder is
 /// opened. All subsequent filesystem commands validate paths against this root.
 #[tauri::command]

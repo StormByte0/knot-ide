@@ -165,6 +165,8 @@
       folder={payload.folder}
       currentFile={activeFilePath}
       onSelect={openFile ?? (() => console.warn('[knot:layout] no openFile context'))}
+      initialExpandedPaths={payload.expandedPaths}
+      onExpandedPathsChange={(paths) => layoutStore.setFileBrowserExpandedPaths(tab.id, paths)}
     />
   {:else}
     <div class="placeholder">

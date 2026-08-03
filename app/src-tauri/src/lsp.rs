@@ -4,6 +4,23 @@
 //! pipes stdin/stdout, and bridges LSP JSON-RPC messages between the frontend
 //! and the subprocess via Tauri events.
 //!
+//! ## Size justification (CONVENTIONS §2.5)
+//!
+//! This file is ~870 lines, exceeding the 800-line guideline. The supervisor
+//! is a single cohesive module with carefully-managed `Send` invariants:
+//! `LspSupervisor` holds `Arc<Mutex<...>>` handles that must be extracted
+//! (`state.arcs()`) before being moved into async tasks, and the stdout
+//! reader + stdin writer + state-tracker + reinitializer all share those
+//! Arcs. Splitting into submodules would either:
+//! - Break the borrow/lifetime patterns by passing the Arcs across module
+//!   boundaries (requiring `pub` fields that expose internal state), or
+//! - Create artificial seams (e.g. "crash capture" as a separate module)
+//!   that would need to re-acquire the same locks the supervisor holds,
+//!   risking deadlocks.
+//!
+//! The module is reviewed + accepted as a single file. The logical sections
+//! are demarcated by `// ── Section ──` comment headers within the file.
+//!
 //! ## Crash-during-edit handling
 //!
 //! When `knot-server` crashes (segfault, panic, OOM kill), the supervisor:

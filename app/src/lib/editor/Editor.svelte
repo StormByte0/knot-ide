@@ -61,6 +61,12 @@
       lineNumbers: 'on',
       renderWhitespace: 'selection',
       bracketPairColorization: { enabled: editorSettingsStore.settings.bracketPairColorization },
+      // CRITICAL: enable semantic highlighting. Without this, Monaco computes
+      // semantic tokens from the LSP but doesn't apply the theme's
+      // `semanticTokenColors` rules — the tokens are silently ignored.
+      // `configuredByTheme` respects the theme's `semanticHighlighting: true`
+      // flag (set in our theme JSON via `toThemeJson`).
+      'semanticHighlighting.enabled': 'configuredByTheme',
     });
 
     console.log('[knot] Monaco editor created for', uri, 'content length:', content.length);
@@ -95,17 +101,25 @@
   // Reactively apply editor settings when they change (e.g. user changed
   // font size in the Settings dialog). $effect re-runs whenever any
   // settingsStore.settings field read inside it changes.
+  //
+  // NOTE: `theme` is intentionally NOT applied here. Theme switching is owned
+  // exclusively by `applyTheme.ts` (which calls `monaco.editor.setTheme`).
+  // Having two paths race (this $effect + applyTheme) caused flicker on
+  // theme switch. The `theme` setting field still triggers reactivity (so
+  // this effect re-runs when the theme changes), but we don't pass it to
+  // `updateOptions` — the applyTheme call handles the Monaco theme swap.
+  // See PLAN.md §13.7.
   $effect(() => {
     if (!editor) return;
     const s = editorSettingsStore.settings;
     editor.updateOptions({
-      theme: s.theme,
       fontFamily: s.fontFamily,
       fontSize: s.fontSize,
       minimap: { enabled: s.minimap },
       tabSize: s.tabSize,
       wordWrap: s.wordWrap,
       bracketPairColorization: { enabled: s.bracketPairColorization },
+      'semanticHighlighting.enabled': 'configuredByTheme',
     });
   });
 

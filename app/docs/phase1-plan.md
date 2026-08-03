@@ -1,6 +1,6 @@
 # Phase 1 — App Shell Plan
 
-**Status:** Planning. Sequential task breakdown for the Phase 1 deliverable from PLAN.md §8: "Multi-window manager, movable/dockable panes, file explorer, multi-tab Monaco, native menu bar, themes, settings."
+**Status:** In progress. Sequential task breakdown for the Phase 1 deliverable from PLAN.md §8: "Multi-window manager, movable/dockable panes, file explorer, multi-tab Monaco, native menu bar, themes, settings."
 
 **Overarching plan:** `PLAN.md` (project root). This document tracks Phase 1 execution.
 
@@ -113,33 +113,40 @@ app/src/lib/
 │   ├── LayoutRoot.svelte     # Root: owns the layout tree state, renders top-level splits
 │   ├── SplitView.svelte      # Horizontal or vertical split with resize handle
 │   ├── DockPanel.svelte      # A panel containing a tab group + content area
-│   ├── TabStrip.svelte       # Tab bar for a DockPanel (drag source + drop target)
+│   ├── TabStrip.svelte       # Tab bar for a DockPanel (drag source + context menu)
 │   ├── ResizeHandle.svelte   # Draggable divider between splits
 │   ├── DropOverlay.svelte    # Visual overlay showing dock zones during drag
-│   └── layoutStore.ts        # Svelte store: layout tree state + persistence
+│   ├── layoutStore.svelte.ts # Layout tree state + operations + persistence (Task 8)
+│   ├── dragStore.svelte.ts   # Active drag session state
+│   └── windowState.ts        # Serialize/deserialize .knot/window-state.json (Task 8)
 ├── windows/                  # NEW — multi-window manager
 │   ├── windowManager.ts      # Create/focus/close child windows, track ownership
-│   ├── windowState.ts        # Track open windows, active window, dispatch events
 │   └── WindowHost.svelte     # Root component for child windows (owns a LayoutRoot)
+│   # Note: `windowState.ts` was originally planned under windows/ but landed
+│   # under layout/ (it serializes the layout tree, not window metadata).
 ├── statusbar/                # NEW — status bar components
 │   ├── StatusBar.svelte      # Main status bar (assembles items)
 │   ├── StatusItem.svelte     # Single status bar item (label + value + click handler)
-│   └── statusStore.ts        # Reactive store for status bar data
+│   └── statusStore.svelte.ts # Reactive store for status bar data
 ├── editor/                   # MODIFIED — multi-tab support
 │   ├── Editor.svelte         # (existing) single editor instance
-│   ├── EditorTabs.svelte     # NEW — tab strip for open editors
-│   ├── editorStore.ts        # NEW — open tabs, active tab, dirty state
 │   ├── monaco-init.ts        # (existing)
 │   └── workers.ts            # (existing)
+│   # Note: Task 2 originally planned `EditorTabs.svelte` + `editorStore.ts`.
+│   # These were superseded by `TabStrip.svelte` + `layoutStore.svelte.ts`
+│   # in Task 3 (kind-agnostic tab strip + unified layout store). The dead
+│   # files were removed during the Phase 1 audit — see PLAN.md §13.2.
 ├── settings/                 # NEW — settings system
 │   ├── types.ts              # EditorSettings, ProjectSettings interfaces
-│   ├── editorSettings.ts     # Load/save <appData>/settings.json
-│   ├── projectSettings.ts    # Load/save .knot/config.json + migration
-│   ├── SettingsDialog.svelte # Settings UI (modal or dock panel)
-│   └── migrate.ts            # .vscode/knot.json → .knot/config.json migration
+│   ├── editorSettings.svelte.ts  # Reactive store: load/save <appData>/settings.json
+│   ├── projectSettings.ts    # Load/save .knot/config.json + migration (inlined)
+│   └── SettingsDialog.svelte # Settings UI (modal)
+│   # Note: `migrate.ts` was originally planned as a separate file; the
+│   # migration logic was inlined into `projectSettings.ts` as
+│   # `migrateVscodeConfig` — see PLAN.md §13.6 for the audit note.
 ├── themes/                   # NEW — theme system
-│   ├── themeStore.ts         # Active theme, load/save preference
-│   ├── themes.ts             # Theme definitions (light, dark, custom)
+│   ├── themeStore.svelte.ts  # Active theme, load/save preference
+│   ├── themes.ts             # Theme definitions (knot-dark, knot-light)
 │   └── applyTheme.ts         # Apply CSS variables + sync Monaco theme
 ├── filebrowser/              # (existing, unchanged)
 ├── lsp/                      # (existing, unchanged)
@@ -281,6 +288,8 @@ Tasks are ordered by dependency. Each task is self-contained and ends with a zip
 ### Task 8 — Window-state persistence
 **Why last:** Depends on layout (Task 3-4) and settings (Task 6). Persists the full window state across app restarts.
 
+**Status:** Implemented.
+
 **Scope:**
 - Extend `layoutStore.ts` with save/load: serialize the layout tree to `.knot/window-state.json`
 - Persist: layout tree (which panels, tab order, split sizes), open tabs, active tab per panel, expanded folders in file browser
@@ -290,6 +299,24 @@ Tasks are ordered by dependency. Each task is self-contained and ends with a zip
 - Migration: if `.knot/window-state.json` doesn't exist, use default layout (file browser left, editor center)
 
 **Deliverable:** modified `layoutStore.ts`, modified `lib.rs` (config path resolution), new `.knot/window-state.json` schema doc
+
+**What was implemented:**
+- New backend module `app/src-tauri/src/window_state.rs` — `load_window_state` + `save_window_state` Tauri commands. Thin file-IO only (no JSON parsing).
+- New backend module `app/src-tauri/src/workspace.rs` — shared pure `validate_workspace_root` helper. `config.rs` refactored to use it (deduplication).
+- New frontend module `app/src/lib/layout/windowState.ts` — pure `serializeLayout` / `deserializeLayout` with version guard, workspace-match check, and structural shape validation.
+- `layoutStore.svelte.ts` gained `loadSavedState(workspaceFolder)` and `saveState(workspaceFolder)` methods + `setFileBrowserExpandedPaths(tabId, paths)` for the filebrowser to write back expand state.
+- `FileBrowser.svelte` accepts `initialExpandedPaths` + `onExpandedPathsChange` props; restores expanded folders on mount (sorted shallowest-first so ancestors load before descendants); notifies the parent on every toggle/expand/collapse.
+- `DockPanel.svelte` wires the filebrowser tab's `expandedPaths` payload to the new props.
+- `App.svelte` loads saved state on workspace open (replacing the unconditional `initDefaultLayout`), sets up a debounced (500ms) `$effect`-driven save on structural layout changes, and flushes the save on `beforeunload`.
+- New schema doc `app/docs/window-state.md`.
+- `FileBrowserTabPayload` extended with optional `expandedPaths: string[]`.
+
+**Architecture notes:**
+- The save `$effect` deliberately reads only structural fields (panel ids, tab lists, sizes, active tab ids, filebrowser `expandedPaths`). Editor-tab `content` and `isDirty` are excluded from the reactivity trigger so typing in the editor doesn't fire a save per keystroke. Content IS included in the saved JSON, but only written to disk on structural changes or window close.
+- Errors during load are logged + swallowed — a corrupt state file falls back to the default layout instead of blocking the app.
+- The `workspaceFolder` field in the JSON is a defensive double-check (the backend already validates the workspace root against the tracked root).
+
+**Not persisted (deferred):** child window state, editor cursor position, file browser scroll position, file browser selection. See `app/docs/window-state.md` for the full "not persisted" list.
 
 ---
 

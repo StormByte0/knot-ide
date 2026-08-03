@@ -39,6 +39,14 @@
   /** Tab id currently hovered (for showing the X on dirty tabs). */
   let hoveredId = $state<string | null>(null);
 
+  /**
+   * Current reorder drop target during an in-strip drag. `null` when no
+   * reorder is pending. `before` is `true` if the dragged tab will be
+   * inserted before `tabId`, `false` if after. Drives the `drop-before` /
+   * `drop-after` CSS classes for the visual indicator.
+   */
+  let reorderTarget = $state<{ tabId: string; before: boolean } | null>(null);
+
   // Reactive reads from the store.
   let panel = $derived(layoutStore.findPanel(panelId));
   let tabs = $derived(panel?.tabs ?? []);
@@ -141,9 +149,68 @@
     dragStore.startDrag(tab.id, panelId);
   }
 
+  /**
+   * Handle dragover on a tab — compute whether to insert before or after
+   * based on pointer X relative to the tab's horizontal center. Stops
+   * propagation so DockPanel doesn't also process this as a split-zone drop
+   * (the tab strip owns in-strip reordering; DockPanel owns split-zone drops
+   * on the panel content area below the strip).
+   *
+   * Sets a visual indicator (drop-before / drop-after class) via the
+   * `reorderTarget` state so the user sees where the tab will land.
+   */
+  function handleTabDragOver(tab: TabData, e: DragEvent): void {
+    if (!dragStore.isActive) return;
+    // Only accept drops from the same panel (cross-panel drops go through
+    // DockPanel's zone logic). This keeps reordering simple — cross-panel
+    // moves use the split/center zones instead.
+    if (dragStore.session?.sourcePanelId !== panelId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const isAfter = e.clientX > rect.left + rect.width / 2;
+    reorderTarget = { tabId: tab.id, before: !isAfter };
+  }
+
+  /** Handle dragleave on a tab — clear the reorder indicator if it was set. */
+  function handleTabDragLeave(tab: TabData): void {
+    if (reorderTarget?.tabId === tab.id) reorderTarget = null;
+  }
+
+  /**
+   * Handle drop on a tab — compute the insertion index + call
+   * `layoutStore.reorderTabInPanel`. Stops propagation so DockPanel doesn't
+   * also process it as a split-zone drop.
+   *
+   * If the source tab is dropped on itself, this is a no-op (the store
+   * clamps to the same index). If dropped on a neighbor, the tab moves
+   * before or after the target based on the pointer position.
+   */
+  function handleTabDrop(tab: TabData, e: DragEvent): void {
+    if (!dragStore.isActive || !dragStore.session) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sourceTabId = dragStore.session.sourceTabId;
+    if (dragStore.session.sourcePanelId !== panelId) return; // cross-panel → DockPanel handles
+    // Compute the target index: insert before `tab` if `before`, else after.
+    const targetIndex = tabs.findIndex((t) => t.id === tab.id);
+    if (targetIndex === -1) return;
+    const insertAt = reorderTarget?.before ? targetIndex : targetIndex + 1;
+    // Adjust for the source tab being removed before insertion: if the
+    // source is before the target index, the target shifts down by one.
+    const sourceIndex = tabs.findIndex((t) => t.id === sourceTabId);
+    const adjustedIndex = sourceIndex !== -1 && sourceIndex < insertAt
+      ? insertAt - 1
+      : insertAt;
+    layoutStore.reorderTabInPanel(panelId, sourceTabId, adjustedIndex);
+    reorderTarget = null;
+  }
+
   /** End a tab drag. Always called (success or cancel). Clears the session. */
   function handleDragEnd(): void {
     dragStore.endDrag();
+    reorderTarget = null;
   }
 
   /** Send a tab to a new OS window (detach). */
@@ -166,14 +233,19 @@
         class:active={tab.id === activeTabId}
         class:dirty={isDirty(tab)}
         class:dragging={dragStore.session?.sourceTabId === tab.id}
+        class:drop-before={reorderTarget?.tabId === tab.id && reorderTarget.before}
+        class:drop-after={reorderTarget?.tabId === tab.id && !reorderTarget.before}
         title={tab.kind === 'editor' ? (tab.payload as EditorTabPayload).path : tab.title}
         draggable="true"
         onclick={() => handleClick(tab)}
         onauxclick={(e) => handleAuxClick(tab, e)}
         oncontextmenu={(e) => handleContextMenu(tab, e)}
         onmouseenter={() => (hoveredId = tab.id)}
-        onmouseleave={() => (hoveredId = null)}
+        onmouseleave={() => { hoveredId = null; handleTabDragLeave(tab); }}
         ondragstart={(e) => handleDragStart(tab, e)}
+        ondragover={(e) => handleTabDragOver(tab, e)}
+        ondragleave={() => handleTabDragLeave(tab)}
+        ondrop={(e) => handleTabDrop(tab, e)}
         ondragend={handleDragEnd}
       >
         <span class="tab-name">{tab.title}</span>
@@ -285,6 +357,28 @@
 
   .tab.dragging {
     opacity: 0.4;
+  }
+
+  /* Reorder drop indicators — a 2px accent-colored bar on the side where the
+     tab will be inserted. Only shows during an active in-strip drag. */
+  .tab.drop-before::before,
+  .tab.drop-after::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--accent);
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .tab.drop-before::before {
+    left: 0;
+  }
+
+  .tab.drop-after::before {
+    right: 0;
   }
 
   .tab.active::after {

@@ -61,6 +61,8 @@ pub fn setup_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             &MenuItem::with_id(app, "play", "Play Story", true, Some("F5"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "watch-toggle", "Toggle Watch", true, Some("Ctrl+Shift+W"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "restart-lsp", "Restart Language Server", true, None::<&str>)?,
         ])?,
         // ── Help ──
         &Submenu::with_items(app, "Help", true, &[

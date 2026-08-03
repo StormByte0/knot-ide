@@ -14,7 +14,9 @@
 use std::path::{Path, PathBuf};
 use tauri::State;
 use tokio::fs;
+
 use crate::fs_ops::WorkspaceRoot;
+use crate::workspace::validate_workspace_root;
 
 /// Default project settings JSON (returned when no config file exists).
 const DEFAULT_PROJECT_CONFIG: &str = r#"{
@@ -46,7 +48,7 @@ pub async fn load_project_settings(
     workspace_root: String,
     state: State<'_, WorkspaceRoot>,
 ) -> Result<String, String> {
-    let root = validate_workspace_root(&workspace_root, &state)?;
+    let root = lookup_workspace_root(&workspace_root, &state)?;
     let path = config_path(&root);
     match fs::read_to_string(&path).await {
         Ok(content) => Ok(content),
@@ -68,17 +70,17 @@ pub async fn save_project_settings(
     json: String,
     state: State<'_, WorkspaceRoot>,
 ) -> Result<(), String> {
-    let root = validate_workspace_root(&workspace_root, &state)?;
+    let root = lookup_workspace_root(&workspace_root, &state)?;
     let path = config_path(&root);
     // Create .knot/ directory if it doesn't exist.
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| {
-            format!("failed to create .knot directory: {e}")
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create .knot directory: {e}"))?;
     }
-    fs::write(&path, &json).await.map_err(|e| {
-        format!("failed to write project config: {e}")
-    })?;
+    fs::write(&path, &json)
+        .await
+        .map_err(|e| format!("failed to write project config: {e}"))?;
     tracing::info!("saved project config to {}", path.display());
     Ok(())
 }
@@ -97,7 +99,7 @@ pub async fn migrate_vscode_config(
     workspace_root: String,
     state: State<'_, WorkspaceRoot>,
 ) -> Result<bool, String> {
-    let root = validate_workspace_root(&workspace_root, &state)?;
+    let root = lookup_workspace_root(&workspace_root, &state)?;
     let new_path = config_path(&root);
     let old_path = vscode_config_path(&root);
 
@@ -111,11 +113,7 @@ pub async fn migrate_vscode_config(
         return Ok(false);
     }
 
-    tracing::info!(
-        "migrating {} → {}",
-        old_path.display(),
-        new_path.display()
-    );
+    tracing::info!("migrating {} → {}", old_path.display(), new_path.display());
 
     // 3. Read the old config.
     let old_content = fs::read_to_string(&old_path)
@@ -134,9 +132,9 @@ pub async fn migrate_vscode_config(
 
     // 6. Write new config.
     if let Some(parent) = new_path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| {
-            format!("failed to create .knot directory: {e}")
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create .knot directory: {e}"))?;
     }
     fs::write(&new_path, &migrated)
         .await
@@ -171,12 +169,15 @@ fn migrate_config_content(old_content: &str) -> String {
         .unwrap_or("");
 
     let mut build_config = serde_json::Map::new();
-    build_config.insert("outputDir".to_string(), serde_json::Value::String("build".to_string()));
-    build_config.insert("outputFormat".to_string(), serde_json::Value::String("html".to_string()));
     build_config.insert(
-        "tweegoFlags".to_string(),
-        serde_json::Value::Array(vec![]),
+        "outputDir".to_string(),
+        serde_json::Value::String("build".to_string()),
     );
+    build_config.insert(
+        "outputFormat".to_string(),
+        serde_json::Value::String("html".to_string()),
+    );
+    build_config.insert("tweegoFlags".to_string(), serde_json::Value::Array(vec![]));
     if !tweego_path.is_empty() {
         build_config.insert(
             "tweegoPath".to_string(),
@@ -210,25 +211,14 @@ fn migrate_config_content(old_content: &str) -> String {
         .unwrap_or_else(|_| DEFAULT_PROJECT_CONFIG.to_string())
 }
 
-/// Validate the workspace root path against the app's tracked root.
-fn validate_workspace_root(
+/// Lock the tracked workspace root state + validate the frontend-provided
+/// path against it. Thin wrapper around the shared pure helper in
+/// `workspace.rs`. Kept here so the three `#[tauri::command]` functions above
+/// don't each repeat the lock+validate dance.
+fn lookup_workspace_root(
     workspace_root: &str,
     state: &State<'_, WorkspaceRoot>,
 ) -> Result<PathBuf, String> {
-    let tracked = state.0.lock().unwrap().clone();
-    let tracked = tracked.ok_or("workspace not set")?;
-    let input = Path::new(workspace_root);
-    let canon_tracked = tracked
-        .canonicalize()
-        .map_err(|e| format!("invalid tracked workspace root: {e}"))?;
-    let canon_input = input
-        .canonicalize()
-        .map_err(|e| format!("invalid workspace root path: {e}"))?;
-    if canon_input != canon_tracked {
-        return Err(format!(
-            "workspace root '{}' does not match the tracked workspace",
-            workspace_root
-        ));
-    }
-    Ok(canon_input)
+    let tracked = state.0.lock().unwrap().clone().ok_or("workspace not set")?;
+    validate_workspace_root(workspace_root, &tracked)
 }

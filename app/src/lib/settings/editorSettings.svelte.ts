@@ -82,6 +82,26 @@ class EditorSettingsStore {
       return null;
     }
   }
+
+  /**
+   * Detect the Tweego version by running `<tweegoPath> --version`. Returns
+   * the version string (e.g. `"2.1.1"`) or `null` if the path is unset or
+   * the binary can't be executed.
+   *
+   * Does NOT update the store — the caller (App.svelte) pushes the result to
+   * `statusStore.setTweegoVersion` for status-bar display. The version isn't
+   * a setting; it's runtime state derived from the configured path.
+   */
+  async detectTweegoVersion(): Promise<string | null> {
+    const path = this.settings.tweegoPath;
+    if (!path) return null;
+    try {
+      return await invoke<string | null>('detect_tweego_version', { tweegoPath: path });
+    } catch (err) {
+      console.error('[knot:settings] failed to detect tweego version:', err);
+      return null;
+    }
+  }
 }
 
 /** Singleton editor settings store. */

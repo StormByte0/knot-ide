@@ -15,11 +15,7 @@
    */
 
   import { editorSettingsStore } from './editorSettings.svelte';
-  import {
-    loadProjectSettings,
-    saveProjectSettings,
-    migrateVscodeConfig,
-  } from './projectSettings';
+  import { projectSettingsStore } from './projectSettingsStore.svelte';
   import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from './types';
   import { themeStore } from '$lib/themes/themeStore.svelte';
   import { BUILT_IN_THEMES } from '$lib/themes/themes';
@@ -36,32 +32,16 @@
   /** Active tab: `'editor'` or `'project'`. */
   let activeTab = $state<'editor' | 'project'>('editor');
 
-  /** Local copy of project settings (loaded on mount, saved on "Save"). */
-  let projectSettings = $state<ProjectSettings>({ ...DEFAULT_PROJECT_SETTINGS });
-  let projectLoaded = $state(false);
+  /**
+   * Project settings are read from + written to the reactive
+   * `projectSettingsStore`. The store is loaded by App.svelte on workspace
+   * open. The dialog edits the store directly — changes apply immediately
+   * (the Editor component reacts to `storyFormat` changes live). "Save"
+   * persists the store to `.knot/config.json`.
+   */
+  let projectSettings = $derived(projectSettingsStore.settings);
+  let projectLoaded = $derived(projectSettingsStore.loaded);
   let projectError = $state<string | null>(null);
-
-  // Load project settings on mount (if a workspace is open).
-  $effect(() => {
-    if (workspaceFolder && !projectLoaded) {
-      loadProject();
-    }
-  });
-
-  async function loadProject(): Promise<void> {
-    if (!workspaceFolder) return;
-    try {
-      // Migrate first (if needed), then load.
-      const migrated = await migrateVscodeConfig(workspaceFolder);
-      if (migrated) {
-        console.log('[knot:settings] migrated .vscode/knot.json → .knot/config.json');
-      }
-      projectSettings = await loadProjectSettings(workspaceFolder);
-      projectLoaded = true;
-    } catch (err) {
-      projectError = err instanceof Error ? err.message : String(err);
-    }
-  }
 
   /** Save editor settings (reactive store — just calls save). */
   async function saveEditor(): Promise<void> {
@@ -72,7 +52,7 @@
   async function saveProject(): Promise<void> {
     if (!workspaceFolder) return;
     try {
-      await saveProjectSettings(workspaceFolder, projectSettings);
+      await projectSettingsStore.save();
     } catch (err) {
       projectError = err instanceof Error ? err.message : String(err);
       return;
@@ -80,11 +60,32 @@
     onClose();
   }
 
-  /** Detect Tweego executable path. */
+  /** Detect Tweego executable path, then detect its version for the status bar. */
   async function handleDetectTweego(): Promise<void> {
     const path = await editorSettingsStore.detectTweego();
     if (!path) {
       alert('Tweego was not found on PATH or common install locations. You can set the path manually.');
+      return;
+    }
+    // Path found — also refresh the version so the status bar updates
+    // immediately (otherwise it would show "not configured" until app restart).
+    await refreshTweegoVersion();
+  }
+
+  /**
+   * Run `tweego --version` via the backend + push the result to the status
+   * store. Defined locally because this dialog owns the "Detect" button —
+   * App.svelte has its own `refreshTweegoVersion` for startup, but importing
+   * it here would create a circular dependency (App imports SettingsDialog).
+   * The status store is the shared state; both callers write to it.
+   */
+  async function refreshTweegoVersion(): Promise<void> {
+    try {
+      const version = await editorSettingsStore.detectTweegoVersion();
+      const { statusStore } = await import('$lib/statusbar/statusStore.svelte');
+      statusStore.setTweegoVersion(version ?? 'not configured');
+    } catch (err) {
+      console.warn('[knot:settings] tweego version detection failed:', err);
     }
   }
 

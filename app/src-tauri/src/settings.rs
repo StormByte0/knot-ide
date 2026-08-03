@@ -116,3 +116,75 @@ pub async fn detect_tweego() -> Result<Option<String>, String> {
     tracing::info!("tweego not detected on PATH or common locations");
     Ok(None)
 }
+
+/// Run `<tweegoPath> --version` and return the version string.
+///
+/// Used to populate the status bar's "Tweego: <version>" item. Combines with
+/// `detect_tweego` (which finds the path) — this verifies the binary actually
+/// runs + extracts its version.
+///
+/// Returns `Ok(Some(version))` on success, `Ok(None)` if the path is empty or
+/// the binary can't be executed, and `Err` only on unexpected failures (the
+/// frontend treats `None` as "not configured" silently — no error toast).
+///
+/// ## Parsing
+///
+/// Tweego's `--version` output looks like:
+/// ```text
+/// Tweego (a Twee compiler) 2.1.1
+/// ```
+///
+/// We return the first whitespace-separated token after the last space, which
+/// captures `2.1.1`. If parsing fails (unexpected output format), we return
+/// the raw stdout trimmed — better to show something than nothing.
+#[tauri::command]
+pub async fn detect_tweego_version(tweego_path: String) -> Result<Option<String>, String> {
+    if tweego_path.trim().is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(&tweego_path);
+    if !path.exists() {
+        tracing::info!("tweego path does not exist: {}", tweego_path);
+        return Ok(None);
+    }
+    // Spawn `--version` (not `--help` — `--version` is fast + universally
+    // supported). Capture stdout + stderr separately; we only parse stdout.
+    let output = tokio::process::Command::new(&path)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn tweego: {e}"))?;
+    if !output.status.success() {
+        tracing::info!(
+            "tweego --version exited with status {} (path: {})",
+            output.status,
+            tweego_path
+        );
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = parse_tweego_version(&stdout);
+    tracing::info!("detected tweego version: {} (from: {:?})", version, stdout.trim());
+    Ok(Some(version))
+}
+
+/// Parse the version string from `tweego --version` output.
+///
+/// Extracts the last whitespace-separated token, which is the version number
+/// in Tweego's standard output format (`Tweego (a Twee compiler) 2.1.1`).
+/// Falls back to the trimmed stdout if parsing fails.
+fn parse_tweego_version(stdout: &str) -> String {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    // Take the last whitespace-separated token. `split_whitespace().last()`
+    // is equivalent to the (non-existent) `rsplit_whitespace().next()`.
+    let last_token = trimmed.split_whitespace().last();
+    match last_token {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => trimmed.to_string(),
+    }
+}

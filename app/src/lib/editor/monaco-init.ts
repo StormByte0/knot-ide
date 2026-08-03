@@ -1,13 +1,32 @@
 /**
  * Monaco + monaco-vscode-api initialization.
  *
- * `initialize()` from `@codingame/monaco-vscode-api` MUST be called exactly
- * once per JS context, before any Monaco editor is created. This sets up VS
- * Code's services (textmate, theme, languages, extensions) inside Monaco.
+ * Registers a single `twee` language. Syntax highlighting is provided
+ * exclusively by the LSP server's semantic token provider — no TextMate
+ * grammars are used. Semantic token colors are applied via the VS Code
+ * configuration setting `editor.semanticTokenColorCustomizations`.
  *
- * For the spike, we register a minimal Twee language and a SugarCube TextMate
- * grammar. The full 5-grammar set (Twee, SugarCube, Harlowe, Chapbook, Snowman)
- * lands in Phase 2.
+ * ## Theme architecture
+ *
+ * Two layers:
+ * 1. **Basic editor colors** (background, foreground, selection, etc.) —
+ *    applied via `monaco.editor.defineTheme` + `setTheme` (standalone API).
+ *    This works reliably for editor chrome colors.
+ * 2. **Semantic token colors** (passageHeader, macro, variable, etc.) —
+ *    applied via `editor.semanticTokenColorCustomizations` in the VS Code
+ *    configuration service. This setting injects semantic token color rules
+ *    into whatever theme is active, regardless of how the theme was
+ *    registered. The theme service reads this setting + applies the rules
+ *    to the semantic token stream from the LSP.
+ *
+ * ## Why not extension contribution themes
+ *
+ * Registering themes as VS Code extension contributions + applying via
+ * `workbench.colorTheme` didn't work — the theme service couldn't find the
+ * themes by id (the editor fell back to the default light theme, producing
+ * a white background). The `semanticTokenColorCustomizations` approach is
+ * more robust: it works with any theme (including standalone-defined ones)
+ * and doesn't require the theme to be in the extension registry.
  */
 
 import { initialize } from '@codingame/monaco-vscode-api';
@@ -15,12 +34,12 @@ import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-over
 import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override';
 import getTextMateServiceOverride from '@codingame/monaco-vscode-textmate-service-override';
 import getExtensionsServiceOverride from '@codingame/monaco-vscode-extensions-service-override';
-import { registerExtension, ExtensionHostKind } from '@codingame/monaco-vscode-api/extensions';
+import getConfigurationServiceOverride, { updateUserConfiguration } from '@codingame/monaco-vscode-configuration-service-override';
 import * as monaco from 'monaco-editor';
 
 import { setupMonacoWorkers } from './workers';
 
-/** Twee language id used across Monaco and the LSP client. */
+/** Twee language id — the single language for all Twine format files. */
 export const TWEE_LANGUAGE_ID = 'twee';
 
 /** Whether `initializeMonaco()` has already run. */
@@ -57,122 +76,22 @@ export async function initializeMonaco(): Promise<void> {
     ],
   });
 
-  // 3. Initialize monaco-vscode-api with service overrides.
+  // 3. Initialize monaco-vscode-api with service overrides. The configuration
+  //    service is needed for `editor.semanticHighlighting.enabled` +
+  //    `editor.semanticTokenColorCustomizations` (set in applyTheme.ts).
   await initialize({
+    ...getConfigurationServiceOverride(),
     ...getThemeServiceOverride(),
     ...getLanguagesServiceOverride(),
     ...getTextMateServiceOverride(),
     ...getExtensionsServiceOverride(),
   });
 
-  // 4. Register the SugarCube TextMate grammar as a VS Code extension
-  //    contribution. This is how monaco-vscode-api loads custom grammars.
-  registerTweeGrammar();
+  // 4. Enable semantic highlighting globally. The `editor.semanticHighlighting.enabled`
+  //    setting must be `true` for Monaco to request + apply semantic tokens
+  //    from the LSP. Setting it via `updateUserConfiguration` puts it in the
+  //    VS Code configuration registry where the theme service reads it.
+  updateUserConfiguration(JSON.stringify({
+    'editor.semanticHighlighting.enabled': true,
+  }));
 }
-
-/**
- * Register a minimal Twee/SugarCube TextMate grammar via the extensions
- * service. The grammar is registered as a local-process extension with an
- * inline virtual file.
- */
-function registerTweeGrammar(): void {
-  const result = registerExtension(
-    {
-      name: 'knot-twee',
-      publisher: 'knot',
-      version: '0.1.0',
-      engines: { vscode: '*' },
-      contributes: {
-        languages: [
-          {
-            id: TWEE_LANGUAGE_ID,
-            aliases: ['Twee', 'Twine'],
-            extensions: ['.tw', '.twee'],
-          },
-        ],
-        grammars: [
-          {
-            language: TWEE_LANGUAGE_ID,
-            scopeName: 'source.twee',
-            path: './syntaxes/twee.tmLanguage.json',
-          },
-        ],
-      },
-    },
-    ExtensionHostKind.LocalProcess,
-  );
-
-  // Register the grammar file content with the extension's virtual FS.
-  // `registerFileUrl` expects a URL; we create a data URL from the JSON.
-  const grammarUrl = `data:application/json;base64,${btoa(JSON.stringify(TWEE_GRAMMAR))}`;
-  result.registerFileUrl('./syntaxes/twee.tmLanguage.json', grammarUrl);
-}
-
-/**
- * Minimal Twee/SugarCube TextMate grammar for the spike.
- *
- * Phase 2 will replace this with the full grammar derived from
- * `crates/formats/src/sugarcube/lsp/token_builder.rs`.
- */
-const TWEE_GRAMMAR = {
-  scopeName: 'source.twee',
-  patterns: [
-    {
-      name: 'meta.header.twee',
-      match: '^(::)\\s*(\\S[^\\[\\{]*?)\\s*(\\[[^\\]]*\\])?\\s*(\\{[^\\}]*\\})?\\s*$',
-      captures: {
-        '1': { name: 'punctuation.definition.header.twee' },
-        '2': { name: 'entity.name.section.twee' },
-        '3': { name: 'meta.tag.twee' },
-        '4': { name: 'meta.metadata.twee' },
-      },
-    },
-    {
-      name: 'meta.link.twee',
-      match: '(\\[\\[)([^\\]\\[]+?)(->|\\|)([^\\]\\[]+?)(\\]\\])',
-      captures: {
-        '1': { name: 'punctuation.definition.link.begin.twee' },
-        '2': { name: 'string.other.link.twee' },
-        '3': { name: 'punctuation.separator.link.twee' },
-        '4': { name: 'entity.name.tag.link.twee' },
-        '5': { name: 'punctuation.definition.link.end.twee' },
-      },
-    },
-    {
-      name: 'meta.link.simple.twee',
-      match: '(\\[\\[)([^\\]\\[]+?)(\\]\\])',
-      captures: {
-        '1': { name: 'punctuation.definition.link.begin.twee' },
-        '2': { name: 'entity.name.tag.link.twee' },
-        '3': { name: 'punctuation.definition.link.end.twee' },
-      },
-    },
-    {
-      name: 'meta.image.twee',
-      match: '(\\[img\\[)([^\\]]+?)(\\]\\])',
-      captures: {
-        '1': { name: 'punctuation.definition.image.begin.twee' },
-        '2': { name: 'string.other.image.twee' },
-        '3': { name: 'punctuation.definition.image.end.twee' },
-      },
-    },
-    {
-      name: 'meta.macro.inline.twee',
-      match: '(<<)([a-zA-Z][\\w]*)([\\s\\S]*?)(>>)',
-      captures: {
-        '1': { name: 'punctuation.definition.macro.begin.twee' },
-        '2': { name: 'entity.name.function.macro.twee' },
-        '4': { name: 'punctuation.definition.macro.end.twee' },
-      },
-    },
-    {
-      name: 'comment.block.twee',
-      begin: '/%',
-      end: '%/',
-      captures: {
-        '0': { name: 'punctuation.definition.comment.twee' },
-      },
-    },
-  ],
-  repository: {},
-};

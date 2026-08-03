@@ -1,18 +1,38 @@
-# Knot App — Phase 0 Spike
+# Knot App
 
-Minimal Tauri 2 + Svelte 5 + Monaco app that validates the core architecture
-before building the full IDE. See `PLAN.md` §8 (Phase 0) and
-`docs/phase0-crash-during-edit.md`.
+Tauri 2 + Svelte 5 + Monaco desktop IDE for Twine/Twee development. Phase 1
+(app shell) is implemented; see `PLAN.md` §8 + `app/docs/phase1-plan.md` for
+the task breakdown and `PLAN.md` §13 for the Phase 1 audit (deferred features
++ known gaps). Phase 0 spike deliverables (Monaco+Vite build, LSP transport,
+crash supervisor) are documented in `app/docs/phase0-supervisor.md`.
 
-## What the spike validates
+## What's implemented
 
 1. **Monaco + Vite production build** — `vite build` succeeds with Monaco
    workers, TextMate grammar, and `@codingame/monaco-vscode-api`. ✅ validated
 2. **LSP transport over Tauri IPC** — `knot-server` spawned as subprocess,
-   JSON-RPC bridged via `invoke` + `event`.
+   JSON-RPC bridged via `invoke` + `event`. Crash supervisor auto-restarts on
+   failure with exponential backoff + state restore.
 3. **TextMate grammar** — minimal Twee/SugarCube grammar renders syntax
-   highlighting in Monaco.
-4. **Crash-during-edit sequence** — design in `docs/phase0-crash-during-edit.md`.
+   highlighting in Monaco. Full grammar lands in Phase 2.
+4. **Multi-tab Monaco editor** — open/close/switch tabs, dirty-state tracking,
+   close-on-dirty confirmation. Save action is a known gap (see `PLAN.md` §13.2).
+5. **Dockable layout** — horizontal/vertical splits, resize handles, drag tabs
+   to dock zones (left/right/top/bottom/center). Tab reordering within a panel
+   is a known gap (see `PLAN.md` §13.3).
+6. **File explorer** — lazy-loading tree, inline new file/folder/rename,
+   cut/copy/paste, drag-and-drop move/copy, keyboard navigation, FS watcher
+   auto-refresh, auto-reveal on file open.
+7. **Multi-window** — detach tabs into child OS windows (multi-monitor support).
+   Child windows are owned by the parent; closing parent closes all children.
+8. **Settings** — two-tier: editor-level (global, `<appData>/settings.json`)
+   + project-level (`.knot/config.json`). Auto-migration from `.vscode/knot.json`.
+9. **Themes** — `knot-dark` + `knot-light` (Tokyo Night palette). CSS variables
+   + Monaco theme sync.
+10. **Window-state persistence** — layout tree, open tabs, active tab per
+    panel, and file-browser expanded folders persist to `.knot/window-state.json`.
+11. **Native menu bar** — File/Edit/View/Build/Help per platform. Some actions
+    are stubs (see `PLAN.md` §13.9).
 
 ## Prerequisites
 
@@ -139,28 +159,73 @@ The CSP in `tauri.conf.json` includes `'wasm-unsafe-eval'` for this.
 app/
 ├── src/                          # Svelte 5 frontend
 │   ├── main.ts                   # entry — mounts App.svelte
-│   ├── App.svelte                # toolbar + editor + status bar
+│   ├── App.svelte                # parent shell: toolbar, layout, status bar
 │   ├── app.css                   # global styles
 │   ├── vite-env.d.ts             # Vite client types (?worker imports)
 │   └── lib/
-│       ├── editor/
+│       ├── editor/               # Monaco editor
 │       │   ├── workers.ts        # MonacoEnvironment.getWorker (?worker imports)
 │       │   ├── monaco-init.ts    # monaco-vscode-api initialize() + grammar
 │       │   └── Editor.svelte     # Monaco editor Svelte component
-│       └── lsp/
+│       ├── layout/               # dock/split layout system (Task 3-4)
+│       │   ├── types.ts          # LayoutNode, SplitNode, PanelNode, TabData
+│       │   ├── LayoutRoot.svelte # recursive renderer
+│       │   ├── SplitView.svelte  # horizontal/vertical split + resize
+│       │   ├── DockPanel.svelte  # panel: TabStrip + content + drop zones
+│       │   ├── TabStrip.svelte   # tab bar (drag source, context menu)
+│       │   ├── ResizeHandle.svelte
+│       │   ├── DropOverlay.svelte
+│       │   ├── layoutStore.svelte.ts   # layout tree state + operations
+│       │   ├── dragStore.svelte.ts     # active drag session
+│       │   └── windowState.ts    # serialize/deserialize .knot/window-state.json
+│       ├── windows/              # multi-window manager (Task 5)
+│       │   ├── windowManager.ts  # create/focus/close child windows
+│       │   └── WindowHost.svelte # root for child windows
+│       ├── filebrowser/          # file explorer
+│       │   ├── FileBrowser.svelte
+│       │   ├── TreeRow.svelte
+│       │   ├── ContextMenu.svelte
+│       │   ├── ConfirmDialog.svelte
+│       │   ├── PromptDialog.svelte
+│       │   ├── icons.ts
+│       │   └── types.ts
+│       ├── statusbar/            # status bar (Task 1)
+│       │   ├── StatusBar.svelte
+│       │   ├── StatusItem.svelte
+│       │   └── statusStore.svelte.ts
+│       ├── settings/             # settings system (Task 6)
+│       │   ├── types.ts          # EditorSettings, ProjectSettings
+│       │   ├── editorSettings.svelte.ts  # reactive store
+│       │   ├── projectSettings.ts        # load/save + migration
+│       │   └── SettingsDialog.svelte
+│       ├── themes/               # theme system (Task 7)
+│       │   ├── themes.ts         # knot-dark, knot-light definitions
+│       │   ├── themeStore.svelte.ts
+│       │   └── applyTheme.ts     # CSS vars + Monaco theme
+│       └── lsp/                  # LSP client
 │           ├── transport.ts      # TauriIpcReader/Writer (vscode-jsonrpc)
 │           └── client.ts         # MonacoLanguageClient setup
 ├── src-tauri/                    # Tauri 2 Rust backend
 │   ├── Cargo.toml
 │   ├── tauri.conf.json           # CSP, window, sidecar config
-│   ├── capabilities/main.json    # permissions for the main window
+│   ├── capabilities/main.json    # permissions for all windows
 │   ├── binaries/                 # sidecar binaries (target-triple-suffixed)
 │   └── src/
 │       ├── main.rs               # entry (windows_subsystem = "windows")
-│       ├── lib.rs                # Tauri builder + plugin registration
-│       └── lsp.rs                # LSP supervisor (tokio::process + framing)
+│       ├── lib.rs                # Tauri builder + plugin + command registration
+│       ├── lsp.rs                # LSP supervisor (tokio::process + framing)
+│       ├── fs_ops.rs             # file I/O commands (list/create/rename/delete)
+│       ├── watcher.rs            # recursive FS watcher (notify-debouncer-full)
+│       ├── config.rs             # .knot/config.json load/save + migration
+│       ├── settings.rs           # <appData>/settings.json load/save + Tweego detect
+│       ├── window_state.rs       # .knot/window-state.json load/save (Task 8)
+│       ├── workspace.rs          # shared workspace-root validation helper
+│       └── menu.rs               # native menu bar (File/Edit/View/Build/Help)
 ├── docs/
-│   └── phase0-crash-during-edit.md
+│   ├── phase0-supervisor.md     # LSP crash supervisor design
+│   ├── phase1-plan.md           # Phase 1 task breakdown
+│   ├── file-explorer.md         # File explorer features + resolved issues
+│   └── window-state.md          # .knot/window-state.json schema
 ├── package.json
 ├── vite.config.ts
 ├── svelte.config.js
@@ -206,11 +271,15 @@ The TextMate worker ships in
 `@codingame/monaco-vscode-textmate-service-override/worker`, NOT in base
 `monaco-editor`.
 
-## What's NOT in the spike
+## What's NOT in Phase 1
 
-- Multi-window (Phase 1)
-- Story Map v2 (Phase 4)
-- Asset manager (Phase 5)
-- Process supervisor with crash capture/restart (Phase 3 — design only)
-- Full TextMate grammars (Phase 2 — minimal grammar only)
-- Auto-updater (Phase 9)
+- **Save action** — known gap, see `PLAN.md` §13.2 (high priority fix)
+- **Full TextMate grammars** — Phase 2 (minimal Twee/SugarCube grammar only)
+- **Story Map v2** — Phase 4
+- **Asset manager** — Phase 5
+- **Build/Run system** — Phase 7 (Tweego detection + build pipeline)
+- **Command palette, find, status bar click actions** — Phase 8
+- **Auto-updater** — Phase 9
+- **In-house compiler** — Phase 10 (future)
+
+See `PLAN.md` §13 for the full Phase 1 audit (deferred features + known gaps).

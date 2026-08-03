@@ -1,48 +1,84 @@
 /**
- * Theme application — CSS variables + Monaco theme registration.
+ * Theme application — CSS variables + Monaco theme + semantic token colors.
  *
- * `applyTheme(theme)` does two things:
- * 1. Sets CSS custom properties on `:root` (e.g. `--bg-editor`, `--fg-default`)
- *    so all components using `var(--...)` update reactively.
- * 2. Calls `monaco.editor.setTheme(theme.monacoName)` to switch Monaco's theme.
+ * `applyTheme(theme)` does three things:
+ * 1. Sets CSS custom properties on `:root` for app chrome (toolbar, sidebar,
+ *    status bar, etc. — anything using `var(--...)` in components).
+ * 2. Defines + applies the Monaco editor theme via `monaco.editor.defineTheme`
+ *    + `setTheme` — this handles editor chrome (background, foreground,
+ *    selection, line numbers, etc.) + TextMate token rules (fallback).
+ * 3. Injects semantic token color rules via `editor.semanticTokenColorCustomizations`
+ *    in the VS Code configuration service. This is the key mechanism for
+ *    semantic token highlighting — the theme service reads this setting +
+ *    applies the rules to the LSP's semantic token stream.
  *
- * `registerMonacoTheme(theme)` defines a Monaco theme (colors + token rules)
- * so it can be referenced by name. Called once per theme at startup.
+ * ## Why `semanticTokenColorCustomizations` (not theme JSON)
+ *
+ * The VS Code theme JSON format has a `semanticTokenColors` field, but loading
+ * it requires registering the theme as an extension contribution + applying
+ * via `workbench.colorTheme` — which didn't work reliably (the theme service
+ * couldn't find the theme by id, causing a white background fallback).
+ *
+ * `editor.semanticTokenColorCustomizations` is a user configuration setting
+ * that injects semantic token rules into WHATEVER theme is active, regardless
+ * of how it was registered. This works with `defineTheme`-registered themes
+ * and is the recommended approach for programmatic theme setup in
+ * `@codingame/monaco-vscode-api`.
  */
 
 import * as monaco from 'monaco-editor';
+import { updateUserConfiguration } from '@codingame/monaco-vscode-configuration-service-override';
 import type { Theme } from './themes';
 
 /**
- * Apply a theme to the app: set CSS variables + switch Monaco theme.
+ * Apply a theme to the app: CSS variables + Monaco editor theme + semantic
+ * token colors.
  *
  * @param theme The theme to apply.
  */
 export function applyTheme(theme: Theme): void {
-  // 1. Set CSS variables on :root.
+  // 1. Set CSS variables on :root for app chrome.
   const root = document.documentElement;
   for (const [key, value] of Object.entries(theme.colors)) {
     root.style.setProperty(`--${key}`, value);
   }
-  // Set a data attribute so components can branch on light/dark if needed
-  // (e.g. for scrollbars, which can't use CSS vars in all browsers).
   root.setAttribute('data-theme', theme.type);
 
-  // 2. Switch Monaco theme.
+  // 2. Define + set the Monaco editor theme (basic editor colors).
+  registerMonacoTheme(theme);
   monaco.editor.setTheme(theme.monacoName);
 
-  console.log('[knot:themes] applied theme:', theme.id);
+  // 3. Inject semantic token color rules via the VS Code configuration service.
+  //    This is what makes semantic tokens from the LSP actually get colored.
+  //    The rules are an array of { scope, foreground, fontStyle } objects.
+  const rules = Object.entries(theme.semanticTokenColors).map(([scope, settings]) => ({
+    scope,
+    foreground: settings.foreground,
+    ...(settings.fontStyle ? { fontStyle: settings.fontStyle } : {}),
+  }));
+  updateUserConfiguration(JSON.stringify({
+    'editor.semanticHighlighting.enabled': true,
+    'editor.semanticTokenColorCustomizations': {
+      enabled: true,
+      rules,
+    },
+  }));
+
+  console.log('[knot:themes] applied theme:', theme.id, 'with', rules.length, 'semantic token rules');
 }
 
 /**
- * Register a Monaco theme by name. Safe to call multiple times — Monaco
- * replaces the existing theme definition.
+ * Register a Monaco theme via the standalone `defineTheme` API. This handles
+ * editor chrome colors (background, foreground, selection, etc.) + TextMate
+ * token rules (fallback for when the LSP hasn't indexed yet).
+ *
+ * Called by `applyTheme` + by `themeStore.init()` (which registers all themes
+ * upfront so they're available for switching).
  *
  * @param theme The theme to register.
  */
 export function registerMonacoTheme(theme: Theme): void {
-  // Build the Monaco theme data structure.
-  const themeData: monaco.editor.IStandaloneThemeData = {
+  monaco.editor.defineTheme(theme.monacoName, {
     base: theme.type === 'dark' ? 'vs-dark' : 'vs',
     inherit: true,
     rules: theme.monacoRules.map((rule) => ({
@@ -54,20 +90,13 @@ export function registerMonacoTheme(theme: Theme): void {
       'editor.background': theme.colors['bg-editor'],
       'editor.foreground': theme.colors['fg-editor'],
       'editor.lineHighlightBackground': theme.colors['bg-editor-line-highlight'],
-      // Explicitly disable the line highlight border — the inherited vs-dark/vs
-      // base theme sets one that hurts readability on dark backgrounds.
       'editor.lineHighlightBorder': '#00000000',
       'editor.selectionBackground': theme.colors['bg-editor-selection'],
       'editorCursor.foreground': theme.colors['fg-editor-cursor'],
       'editorWhitespace.foreground': theme.colors['fg-editor-whitespace'],
       'editorIndentGuide.background': theme.colors['fg-editor-whitespace'],
-      // Line numbers: muted version of the editor foreground so they don't
-      // compete with the code for attention.
       'editorLineNumber.foreground': theme.colors['fg-muted'],
       'editorLineNumber.activeForeground': theme.colors['fg-subtle'],
     },
-  };
-
-  monaco.editor.defineTheme(theme.monacoName, themeData);
-  console.log('[knot:themes] registered Monaco theme:', theme.monacoName);
+  });
 }

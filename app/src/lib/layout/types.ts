@@ -79,4 +79,12 @@ export interface EditorTabPayload {
 export interface FileBrowserTabPayload {
   /** Workspace root path. */
   folder: string;
+  /**
+   * Absolute paths of directories that should start expanded when the
+   * filebrowser mounts. Populated by the layout store when restoring from
+   * `.knot/window-state.json`; updated by the filebrowser as the user
+   * expands/collapses folders. `undefined` on a fresh workspace (no saved
+   * state yet) — the filebrowser starts with everything collapsed.
+   */
+  expandedPaths?: string[];
 }

@@ -28,8 +28,19 @@ export interface Theme {
   monacoName: string;
   /** Flat map of CSS variable name (without `--`) → color value. */
   colors: Record<string, string>;
-  /** Monaco token colors (syntax highlighting rules). */
+  /** Monaco token colors (TextMate scope → color, for grammar-based highlighting). */
   monacoRules: MonacoTokenRule[];
+  /**
+   * Semantic token colors (token type + modifier → color, for LSP semantic
+   * token highlighting). Keys are `type` or `type.modifier` (e.g.
+   * `'variable'`, `'macroDelimiter.blockDepth1'`). Values are `{ foreground,
+   * fontStyle }`.
+   *
+   * The LSP server sends semantic tokens with these type/modifier names;
+   * Monaco maps them to colors using this map. See
+   * `crates/formats/src/plugin.rs` for the full type/modifier enum.
+   */
+  semanticTokenColors: Record<string, { foreground: string; fontStyle?: string }>;
 }
 
 /** A Monaco syntax highlighting rule (matches VS Code's tokenColors format). */
@@ -42,6 +53,39 @@ export interface MonacoTokenRule {
     foreground?: string;
     /** Font style, e.g. `'bold'`. */
     fontStyle?: string;
+  };
+}
+
+/**
+ * Build the VS Code theme JSON object for a theme. This is the format that
+ * `@codingame/monaco-vscode-api`'s theme service override expects when
+ * registering themes as extension contributions.
+ *
+ * Includes `semanticHighlighting: true` — without this, Monaco computes
+ * semantic tokens but doesn't apply the `semanticTokenColors` rules.
+ */
+export function toThemeJson(theme: Theme): Record<string, unknown> {
+  return {
+    name: theme.name,
+    type: theme.type,
+    semanticHighlighting: true,
+    colors: {
+      'editor.background': theme.colors['bg-editor'],
+      'editor.foreground': theme.colors['fg-editor'],
+      'editor.lineHighlightBackground': theme.colors['bg-editor-line-highlight'],
+      'editor.lineHighlightBorder': '#00000000',
+      'editor.selectionBackground': theme.colors['bg-editor-selection'],
+      'editorCursor.foreground': theme.colors['fg-editor-cursor'],
+      'editorWhitespace.foreground': theme.colors['fg-editor-whitespace'],
+      'editorIndentGuide.background': theme.colors['fg-editor-whitespace'],
+      'editorLineNumber.foreground': theme.colors['fg-muted'],
+      'editorLineNumber.activeForeground': theme.colors['fg-subtle'],
+    },
+    tokenColors: theme.monacoRules.map((rule) => ({
+      scope: rule.scope,
+      settings: rule.settings,
+    })),
+    semanticTokenColors: theme.semanticTokenColors,
   };
 }
 
@@ -116,6 +160,55 @@ export const KNOT_DARK: Theme = {
     { scope: 'meta.metadata.twee', settings: { foreground: '#565f89' } },
     { scope: 'comment.block.twee', settings: { foreground: '#565f89' } },
   ],
+  semanticTokenColors: {
+    'passageHeader': { foreground: '#e0af68', fontStyle: 'bold' },
+    'passageName': { foreground: '#e0af68' },
+    'specialPassageHeader': { foreground: '#ff9e64', fontStyle: 'bold' },
+    'specialPassage': { foreground: '#ff9e64', fontStyle: 'bold' },
+    'tag': { foreground: '#73daca' },
+    'tag.twineCore': { foreground: '#73daca', fontStyle: 'bold' },
+    'tag.storyFormat': { foreground: '#73daca', fontStyle: 'italic' },
+    'prose': { foreground: '#c0caf5' },
+    'inlineStyle': { foreground: '#73daca' },
+    'textFormat': { foreground: '#cdd5f5' },
+    'variable': { foreground: '#f7768e', fontStyle: 'italic' },
+    'variable.definition': { foreground: '#f7768e', fontStyle: 'italic bold' },
+    'variable.readonly': { foreground: '#f7768e', fontStyle: 'italic' },
+    'link': { foreground: '#73daca', fontStyle: 'underline' },
+    'passageRef': { foreground: '#73daca' },
+    'macro': { foreground: '#7aa2f7' },
+    'macro.controlFlow': { foreground: '#7aa2f7', fontStyle: 'italic' },
+    'macro.deprecated': { foreground: '#7aa2f7', fontStyle: 'strikethrough' },
+    'macroDelimiter': { foreground: '#6e7faa' },
+    'macroDelimiter.controlFlow': { foreground: '#6e7faa', fontStyle: 'italic' },
+    'macroDelimiter.deprecated': { foreground: '#6e7faa', fontStyle: 'strikethrough' },
+    'macroDelimiter.blockDepth1': { foreground: '#7aa2f7' },
+    'macroDelimiter.blockDepth2': { foreground: '#73daca' },
+    'macroDelimiter.blockDepth3': { foreground: '#9ece6a' },
+    'macroDelimiter.blockDepth4': { foreground: '#e0af68' },
+    'macroDelimiter.blockDepth5': { foreground: '#f7768e' },
+    'macroDelimiter.blockDepth6': { foreground: '#a371f7' },
+    'function': { foreground: '#a371f7' },
+    'function.definition': { foreground: '#a371f7', fontStyle: 'bold' },
+    'function.deprecated': { foreground: '#a371f7', fontStyle: 'strikethrough' },
+    'keyword': { foreground: '#e0af68', fontStyle: 'italic' },
+    'namespace': { foreground: '#2ac3de', fontStyle: 'bold' },
+    'property': { foreground: '#3fbfa3' },
+    'property.definition': { foreground: '#3fbfa3', fontStyle: 'bold' },
+    'operator': { foreground: '#7dcfff' },
+    'string': { foreground: '#9ece6a' },
+    'number': { foreground: '#ff9e64' },
+    'boolean': { foreground: '#ff9e64' },
+    'comment': { foreground: '#7a88cf', fontStyle: 'italic' },
+    'heading': { foreground: '#7aa2f7', fontStyle: 'bold' },
+    'horizontalRule': { foreground: '#565f89' },
+    'listMarker': { foreground: '#7aa2f7' },
+    'blockquote': { foreground: '#7dcfff', fontStyle: 'italic' },
+    'blockquoteBlock': { foreground: '#7dcfff', fontStyle: 'italic' },
+    'table': { foreground: '#73daca' },
+    'codeBlock': { foreground: '#9ece6a' },
+    'inlineCode': { foreground: '#9ece6a' },
+  },
 };
 
 /**
@@ -188,6 +281,55 @@ export const KNOT_LIGHT: Theme = {
     { scope: 'meta.metadata.twee', settings: { foreground: '#9aa5ce' } },
     { scope: 'comment.block.twee', settings: { foreground: '#9aa5ce' } },
   ],
+  semanticTokenColors: {
+    'passageHeader': { foreground: '#8c5a00', fontStyle: 'bold' },
+    'passageName': { foreground: '#8c5a00' },
+    'specialPassageHeader': { foreground: '#b85c00', fontStyle: 'bold' },
+    'specialPassage': { foreground: '#b85c00', fontStyle: 'bold' },
+    'tag': { foreground: '#1c6b8c' },
+    'tag.twineCore': { foreground: '#1c6b8c', fontStyle: 'bold' },
+    'tag.storyFormat': { foreground: '#1c6b8c', fontStyle: 'italic' },
+    'prose': { foreground: '#343b58' },
+    'inlineStyle': { foreground: '#1c6b8c' },
+    'textFormat': { foreground: '#2d3556' },
+    'variable': { foreground: '#8c4351', fontStyle: 'italic' },
+    'variable.definition': { foreground: '#8c4351', fontStyle: 'italic bold' },
+    'variable.readonly': { foreground: '#8c4351', fontStyle: 'italic' },
+    'link': { foreground: '#1c6b8c', fontStyle: 'underline' },
+    'passageRef': { foreground: '#1c6b8c' },
+    'macro': { foreground: '#34548a' },
+    'macro.controlFlow': { foreground: '#34548a', fontStyle: 'italic' },
+    'macro.deprecated': { foreground: '#34548a', fontStyle: 'strikethrough' },
+    'macroDelimiter': { foreground: '#5c6a7e' },
+    'macroDelimiter.controlFlow': { foreground: '#5c6a7e', fontStyle: 'italic' },
+    'macroDelimiter.deprecated': { foreground: '#5c6a7e', fontStyle: 'strikethrough' },
+    'macroDelimiter.blockDepth1': { foreground: '#34548a' },
+    'macroDelimiter.blockDepth2': { foreground: '#0e7490' },
+    'macroDelimiter.blockDepth3': { foreground: '#336f3c' },
+    'macroDelimiter.blockDepth4': { foreground: '#8c5a00' },
+    'macroDelimiter.blockDepth5': { foreground: '#8c4351' },
+    'macroDelimiter.blockDepth6': { foreground: '#6b3fa0' },
+    'function': { foreground: '#6b3fa0' },
+    'function.definition': { foreground: '#6b3fa0', fontStyle: 'bold' },
+    'function.deprecated': { foreground: '#6b3fa0', fontStyle: 'strikethrough' },
+    'keyword': { foreground: '#8c5a00', fontStyle: 'italic' },
+    'namespace': { foreground: '#0e7490', fontStyle: 'bold' },
+    'property': { foreground: '#336f3c' },
+    'property.definition': { foreground: '#336f3c', fontStyle: 'bold' },
+    'operator': { foreground: '#5c6a7e' },
+    'string': { foreground: '#336f3c' },
+    'number': { foreground: '#b85c00' },
+    'boolean': { foreground: '#b85c00' },
+    'comment': { foreground: '#9aa5ce', fontStyle: 'italic' },
+    'heading': { foreground: '#34548a', fontStyle: 'bold' },
+    'horizontalRule': { foreground: '#9aa5ce' },
+    'listMarker': { foreground: '#34548a' },
+    'blockquote': { foreground: '#5c6a7e', fontStyle: 'italic' },
+    'blockquoteBlock': { foreground: '#5c6a7e', fontStyle: 'italic' },
+    'table': { foreground: '#1c6b8c' },
+    'codeBlock': { foreground: '#336f3c' },
+    'inlineCode': { foreground: '#336f3c' },
+  },
 };
 
 /** All built-in themes, keyed by id. */

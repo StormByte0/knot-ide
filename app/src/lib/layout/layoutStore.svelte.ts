@@ -30,6 +30,8 @@ import type {
   PanelNode,
   TabData,
 } from './types';
+import { invoke } from '@tauri-apps/api/core';
+import { deserializeLayout, serializeLayout } from './windowState';
 
 class LayoutStore {
   /** Root of the layout tree. `null` when no workspace is open. */
@@ -74,6 +76,88 @@ class LayoutStore {
   /** Reset the layout to `null` (no workspace). */
   clear(): void {
     this.root = null;
+  }
+
+  // ── Window-state persistence ───────────────────────────────────────
+  //
+  // The store owns layout structure; persistence is a thin layer that
+  // serializes the tree to `.knot/window-state.json` (via the Rust
+  // `save_window_state` / `load_window_state` commands). The store does NOT
+  // own the save trigger — that's the app shell's responsibility (it knows
+  // when the workspace is open + can debounce). See `App.svelte` for the
+  // reactive `$effect` that calls `save` on layout changes.
+
+  /**
+   * Load the saved window state for a workspace. If a saved layout exists,
+   * hydrates the store with it. If not (first open), initializes the default
+   * layout. Returns `true` if a saved state was loaded, `false` if defaults
+   * were used.
+   *
+   * Errors are logged + swallowed — a corrupt state file should NOT prevent
+   * the app from opening. The user gets the default layout instead.
+   */
+  async loadSavedState(workspaceFolder: string): Promise<boolean> {
+    try {
+      const json = await invoke<string | null>('load_window_state', { workspaceRoot: workspaceFolder });
+      if (json === null) {
+        // No saved state — use defaults.
+        this.initDefaultLayout(workspaceFolder);
+        return false;
+      }
+      const restored = deserializeLayout(json, workspaceFolder);
+      if (!restored) {
+        // Validation failed — fall back to defaults.
+        console.warn('[knot:layout] saved state failed validation, using defaults');
+        this.initDefaultLayout(workspaceFolder);
+        return false;
+      }
+      this.root = restored;
+      console.log('[knot:layout] restored saved window state');
+      // Reload every editor tab's content from disk. The saved state's cached
+      // content may be stale (file changed on disk while the app was closed).
+      // Re-reading here — before any Editor component mounts — ensures the
+      // Editor gets fresh content on first render. Tabs whose files were
+      // deleted keep their cached content + are marked dirty so the user is
+      // warned before closing. See PLAN.md §13.8.
+      await this.reloadAllEditorTabsFromDisk();
+      return true;
+    } catch (err) {
+      console.error('[knot:layout] failed to load window state:', err);
+      this.initDefaultLayout(workspaceFolder);
+      return false;
+    }
+  }
+
+  /**
+   * Re-read every editor tab's file from disk. Called after layout restore
+   * to avoid stale cached content (PLAN.md §13.8). Walks the tree, collects
+   * all editor tab ids, then reloads each in parallel (independent reads).
+   *
+   * Tabs whose files were deleted keep their cached content + are marked
+   * dirty (so the close-dirty confirmation fires if the user closes them).
+   */
+  async reloadAllEditorTabsFromDisk(): Promise<void> {
+    if (!this.root) return;
+    const tabIds = collectEditorTabIds(this.root);
+    if (tabIds.length === 0) return;
+    // Parallel reads — independent files, no ordering dependency.
+    await Promise.all(tabIds.map((id) => this.reloadTabFromDisk(id)));
+  }
+
+  /**
+   * Serialize the current layout tree to `.knot/window-state.json`. No-op if
+   * no workspace is open. Errors are logged + swallowed — a failed save
+   * should NOT crash the app or interrupt the user's editing.
+   */
+  async saveState(workspaceFolder: string): Promise<void> {
+    const state = serializeLayout(this.root, workspaceFolder);
+    if (!state) return;
+    try {
+      const json = JSON.stringify(state);
+      await invoke('save_window_state', { workspaceRoot: workspaceFolder, json });
+    } catch (err) {
+      console.error('[knot:layout] failed to save window state:', err);
+    }
   }
 
   // ── Tab operations ──────────────────────────────────────────────────
@@ -199,13 +283,104 @@ class LayoutStore {
     payload.isDirty = true;
   }
 
-  /** Mark an editor tab clean (e.g. after save — not wired yet). */
+  /** Mark an editor tab clean (e.g. after save). */
   markTabClean(tabId: string): void {
     const panel = this.findPanelByTabId(tabId);
     if (!panel) return;
     const tab = panel.tabs.find((t) => t.id === tabId);
     if (!tab || tab.kind !== 'editor') return;
     (tab.payload as EditorTabPayload).isDirty = false;
+  }
+
+  /**
+   * Save an editor tab's content to disk via the Rust `write_file` command.
+   * On success, marks the tab clean. On failure, logs the error + leaves the
+   * tab dirty (so the user knows the save didn't happen).
+   *
+   * Returns `true` on success, `false` on failure. The caller (App.svelte's
+   * menu handler) shows an alert on failure so the user can retry.
+   *
+   * ## Why the store owns this (not the Editor component)
+   *
+   * The Editor component owns the Monaco model, but the store owns the tab
+   * list + dirty state. Save is a tab-list operation (which tab, is it dirty,
+   * mark it clean after) — not an editor operation. The Editor reads content
+   * from the tab payload (kept in sync via `markTabContentChanged`), so the
+   * store always has the latest content to write.
+   */
+  async saveTab(tabId: string): Promise<boolean> {
+    const panel = this.findPanelByTabId(tabId);
+    if (!panel) return false;
+    const tab = panel.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind !== 'editor') return false;
+    const payload = tab.payload as EditorTabPayload;
+    try {
+      await invoke('write_file', { path: payload.path, contents: payload.content });
+      payload.isDirty = false;
+      console.log('[knot:layout] saved tab:', tabId);
+      return true;
+    } catch (err) {
+      console.error('[knot:layout] failed to save tab:', tabId, err);
+      return false;
+    }
+  }
+
+  /**
+   * Save the active editor tab (if any). Convenience for the `Ctrl+S` menu
+   * action — the caller doesn't need to know the tab id.
+   *
+   * Returns `true` if a tab was saved (or no tab was open — no-op success),
+   * `false` if the save failed.
+   */
+  async saveActiveEditorTab(): Promise<boolean> {
+    const tab = this.getActiveEditorTab();
+    if (!tab) return true; // No tab open — not an error.
+    return this.saveTab(tab.id);
+  }
+
+  /**
+   * Re-read an editor tab's file from disk + update the cached content +
+   * dirty flag. Used on layout restore to avoid stale content (PLAN.md §13.8).
+   *
+   * If the file no longer exists on disk, the tab keeps its cached content +
+   * is marked dirty (so the user is warned before closing). If the disk
+   * content matches the cached content, this is a no-op (just marks clean).
+   *
+   * Returns the fresh content on success, or `null` if the read failed (tab
+   * left untouched).
+   */
+  async reloadTabFromDisk(tabId: string): Promise<string | null> {
+    const panel = this.findPanelByTabId(tabId);
+    if (!panel) return null;
+    const tab = panel.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind !== 'editor') return null;
+    const payload = tab.payload as EditorTabPayload;
+    try {
+      const fresh = await invoke<string>('read_file', { path: payload.path });
+      payload.content = fresh;
+      payload.isDirty = false;
+      return fresh;
+    } catch (err) {
+      // File doesn't exist or unreadable — keep cached content, mark dirty
+      // so the user is warned before closing the tab.
+      console.warn('[knot:layout] reload from disk failed for', tabId, '— keeping cached content:', err);
+      payload.isDirty = true;
+      return null;
+    }
+  }
+
+  /**
+   * Update the filebrowser tab's `expandedPaths` payload. Called by the
+   * `FileBrowser` component whenever the user expands/collapses a folder, so
+   * the expanded state persists across layout saves. No-op if the tab is not
+   * a filebrowser tab.
+   */
+  setFileBrowserExpandedPaths(tabId: string, expandedPaths: string[]): void {
+    const panel = this.findPanelByTabId(tabId);
+    if (!panel) return;
+    const tab = panel.tabs.find((t) => t.id === tabId);
+    if (!tab || tab.kind !== 'filebrowser') return;
+    (tab.payload as FileBrowserTabPayload).expandedPaths = expandedPaths;
   }
 
   // ── Resize ──────────────────────────────────────────────────────────
@@ -501,6 +676,27 @@ function findActiveEditorTab(node: LayoutNode): TabData | null {
     if (found) return found;
   }
   return null;
+}
+
+/**
+ * Collect every editor tab id in the tree (depth-first). Used by
+ * {@link LayoutStore.reloadAllEditorTabsFromDisk} to re-read each file from
+ * disk after layout restore. Returns an empty array if the tree has no
+ * editor tabs.
+ */
+function collectEditorTabIds(node: LayoutNode): string[] {
+  const result: string[] = [];
+  function walk(n: LayoutNode): void {
+    if (n.type === 'panel') {
+      for (const tab of n.tabs) {
+        if (tab.kind === 'editor') result.push(tab.id);
+      }
+    } else {
+      for (const child of n.children) walk(child);
+    }
+  }
+  walk(node);
+  return result;
 }
 
 /** Cross-platform basename. */
